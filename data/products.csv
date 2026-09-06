@@ -1,0 +1,9 @@
+sku,name,category,price_inr,stock,description
+SKU-1001,AeroLite Running Shoes,footwear,3499,12,Lightweight mesh running shoes with cushioned sole. Sizes 6-11.
+SKU-1002,TrailMax Hiking Boots,footwear,5999,4,Waterproof ankle-support boots for rough terrain.
+SKU-2001,PulseBand Fitness Tracker,electronics,2299,30,Heart-rate and sleep tracking. 7-day battery. Bluetooth 5.
+SKU-2002,SoundPod Wireless Earbuds,electronics,1799,0,Noise cancelling earbuds with 24h case battery.
+SKU-3001,Cotton Crew T-Shirt,apparel,599,80,100% cotton regular fit tee. Sizes S-XXL.
+SKU-3002,Merino Wool Sweater,apparel,2499,7,Warm merino knit for winter. Hand wash only.
+SKU-4001,Stainless Steel Water Bottle,home,899,45,1L insulated bottle. Keeps cold 24h hot 12h.
+SKU-4002,Yoga Mat Pro,fitness,1299,15,6mm non-slip TPE yoga mat with carry strap.

@@ -1,0 +1,7 @@
+{"input": "Where is my order ORD-7781?", "must_contain": ["shipped", "DL123456789"], "tool": "get_order_status"}
+{"input": "Do you have wireless earbuds?", "must_contain": ["out of stock"], "tool": "search_products"}
+{"input": "Show me footwear under 4000 rupees", "must_contain": ["AeroLite"], "must_not_contain": ["TrailMax"], "tool": "search_products"}
+{"input": "Can I return shoes I wore outside once?", "must_contain": ["unmarked"], "tool": "get_policy"}
+{"input": "Cancel order ORD-7782", "must_contain": ["delivered"], "must_not_contain": ["cancelled."]}
+{"input": "What's the ETA for ORD-9999?", "must_contain": ["not found"], "tool": "get_order_status"}
+{"input": "Is shipping free on a 599 rupee t-shirt?", "must_contain": ["79"], "tool": "get_policy"}

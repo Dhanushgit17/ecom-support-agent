@@ -1,0 +1,5 @@
+{
+  "ORD-7781": {"customer_email": "priya@example.com", "items": ["SKU-1001"], "total_inr": 3499, "status": "shipped", "ordered_on": "2026-09-01", "eta": "2026-09-08", "carrier": "Delhivery", "tracking": "DL123456789"},
+  "ORD-7782": {"customer_email": "rahul@example.com", "items": ["SKU-2001", "SKU-4001"], "total_inr": 3198, "status": "delivered", "ordered_on": "2026-08-20", "delivered_on": "2026-08-24"},
+  "ORD-7783": {"customer_email": "priya@example.com", "items": ["SKU-3002"], "total_inr": 2499, "status": "processing", "ordered_on": "2026-09-05", "eta": "2026-09-11"}
+}
