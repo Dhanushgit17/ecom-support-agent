@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
-from langgraph.checkpoint.memory import MemorySaver
+import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
@@ -44,7 +45,7 @@ graph.add_conditional_edges("agent", tools_condition)  # -> "tools" or END
 graph.add_edge("tools", "agent")
 
 app = graph.compile(
-    checkpointer=MemorySaver(),   # swap for SqliteSaver/PostgresSaver in prod
+    checkpointer=SqliteSaver(sqlite3.connect("checkpoints.db", check_same_thread=False)),
     interrupt_before=["tools"],   # pause before ANY tool; we approve only cancel_order below
 )
 
