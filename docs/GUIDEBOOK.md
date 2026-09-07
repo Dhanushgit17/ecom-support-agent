@@ -195,6 +195,8 @@ git checkout data/orders.json   # reset the mock DB after testing
 
 ---
 
+---
+
 ## Chapter 6 — RAG: retrieval, and where it fails
 
 **Goal:** replace the keyword policy lookup with semantic search, wire it into the agent, and see two kinds of hallucination up close.
