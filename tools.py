@@ -12,22 +12,27 @@ DATA = Path(__file__).parent / "data"
 # ---------- Tool implementations ----------
 
 def search_products(query: str, category: str | None = None, max_price_inr: float | None = None) -> str:
-    """Keyword search over the product catalog."""
+    """Keyword search over the catalog. Always returns in-stock alternatives too."""
     q = query.lower()
-    results = []
+    matches, in_stock_nearby = [], []
     with open(DATA / "products.csv", newline="") as f:
         for row in csv.DictReader(f):
-            text = f"{row['name']} {row['category']} {row['description']}".lower()
-            if q not in text and not any(w in text for w in q.split()):
-                continue
-            if category and row["category"] != category.lower():
-                continue
-            if max_price_inr and float(row["price_inr"]) > max_price_inr:
-                continue
             row["in_stock"] = int(row["stock"]) > 0
-            results.append(row)
-    return json.dumps(results[:5]) if results else "No products matched."
+            same_cat = (not category) or row["category"] == category.lower()
+            if same_cat and row["in_stock"]:
+                in_stock_nearby.append(row)
+            text = f"{row['name']} {row['category']} {row['description']}".lower()
+            keyword_hit = q in text or any(w in text for w in q.split())
+            price_ok = not max_price_inr or float(row["price_inr"]) <= max_price_inr
+            if keyword_hit and same_cat and price_ok:
+                matches.append(row)
 
+    alternatives = [r for r in in_stock_nearby if r not in matches][:3]
+    return json.dumps({
+        "matches": matches[:5],
+        "in_stock_alternatives": alternatives,
+        "note": "Suggest from in_stock_alternatives if matches are empty or out of stock. Do not search again.",
+    })
 
 def get_order_status(order_id: str) -> str:
     """Look up an order by ID."""
