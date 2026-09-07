@@ -5,6 +5,7 @@ This is the same "tool" concept as an n8n node, except you own the code.
 import csv
 import json
 from pathlib import Path
+from rag import retrieve_policy
 
 DATA = Path(__file__).parent / "data"
 
@@ -41,21 +42,9 @@ def get_order_status(order_id: str) -> str:
     return json.dumps(order) if order else f"Order {order_id} not found."
 
 
-def get_policy(topic: str) -> str:
-    """Return the store policy section for: returns, shipping, cancellations."""
-    text = (DATA / "policies.md").read_text()
-    sections = {}
-    current = None
-    for line in text.splitlines():
-        if line.startswith("## "):
-            current = line[3:].strip().lower()
-            sections[current] = []
-        elif current:
-            sections[current].append(line)
-    key = topic.lower().strip()
-    if key in sections:
-        return "\n".join(sections[key]).strip()
-    return f"No policy for '{topic}'. Available: {', '.join(sections)}"
+def get_policy(question: str) -> str:
+    """Semantic search over store policies. Ask in natural language."""
+    return retrieve_policy(question)
 
 
 def cancel_order(order_id: str) -> str:
@@ -112,15 +101,15 @@ TOOL_SCHEMAS = [
             },
         },
     },
-    {
+           {
         "type": "function",
         "function": {
             "name": "get_policy",
-            "description": "Fetch the store policy on a topic: returns, shipping, or cancellations.",
+            "description": "Search store policies (returns, shipping, cancellations) with a natural-language question.",
             "parameters": {
                 "type": "object",
-                "properties": {"topic": {"type": "string"}},
-                "required": ["topic"],
+                "properties": {"question": {"type": "string", "description": "e.g. 'Can I return worn shoes?'"}},
+                "required": ["question"],
             },
         },
     },

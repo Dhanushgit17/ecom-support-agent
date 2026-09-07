@@ -4,3 +4,4 @@ langchain-core
 langchain-groq
 langgraph
 langgraph-checkpoint-sqlite
+chromadb

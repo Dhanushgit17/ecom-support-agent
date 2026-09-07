@@ -125,6 +125,74 @@ python -c "from tools import search_products; print(search_products('laptop', ca
 python agent_raw.py   # "Do you have wireless earbuds?" -> exactly one [tool] line
 ```
 
+---
+
+## Chapter 4 — Rebuilding the loop in LangGraph, and memory that survives
+
+**Goal:** understand why a working 40-line loop gets rebuilt as a graph, and give the agent memory that outlives the process.
+
+### Why a graph
+
+Three things production needs that a plain loop can't give cleanly:
+
+1. **Memory that survives** restarts and works across multiple servers. Needs a database behind the conversation.
+2. **Pausing.** A hard stop before a risky tool, resumable later. A loop can't freeze mid-iteration.
+3. **Branching.** Routing to sub-agents, running tools in parallel, retries. That's a flowchart, not a loop.
+
+LangGraph: you draw the flowchart, it runs it. Nodes are boxes (`agent`, `tools`), edges are arrows, a conditional edge is the diamond that decides `tools` or `END`, state is the data on the arrows (the message list), and a checkpointer saves state after every node. It's n8n's mental model, written in Python, with the model choosing the arrow.
+
+### Mapping the raw loop to the graph
+
+| `agent_raw.py` | `agent_langgraph.py` |
+|---|---|
+| `client.chat.completions.create(...)` | `agent` node |
+| `if not msg.tool_calls: return` | conditional edge → `END` |
+| `for tc in msg.tool_calls: TOOL_FUNCTIONS[name](**args)` | `tools` node (`ToolNode`) |
+| the outer `for step in range(MAX_STEPS)` | edge `tools → agent` |
+| the `messages` list | `MessagesState` |
+
+Nothing new happens. Same loop, drawn as boxes so it can be saved, paused, and branched.
+
+### Memory: two experiments
+
+1. With `MemorySaver`: asked about ORD-7781, then "what did I ask?" — it remembered. Restarted the program and asked again — **it had no idea.** `MemorySaver` keeps checkpoints in RAM; the process dies, memory dies.
+2. Swapped one line to `SqliteSaver(sqlite3.connect("checkpoints.db", ...))`. Restarted and asked — **it remembered.** Every state change is written to disk, and `thread_id="user-1"` points the new process at the same thread.
+
+The graph code didn't change at all. That swappability is the point. Production uses the same pattern with Postgres.
+
+Housekeeping: `checkpoints.db` is data, so it went into `.gitignore`; `langgraph-checkpoint-sqlite` went into `requirements.txt` so the project stays reproducible.
+
+---
+
+## Chapter 5 — Human-in-the-loop: prompts shape, code enforces
+
+**Goal:** see the difference between the model *choosing* to ask permission and the code *requiring* it.
+
+### What happened
+
+First cancel attempt: the model checked the order, asked me to confirm, insisted on "yes" rather than "y" (model quirk), and only then tried to call `cancel_order`. At that moment the code paused with `[approval needed] ... (y/n)`. I said `n`. Nothing was cancelled.
+
+Second cancel attempt, same session: **the model skipped the confirmation entirely.** It remembered I'd already said yes, so it went straight to the tool. On Sunday's raw agent that would have cancelled instantly. Today the code gate caught it anyway, I said `y`, and only then did the cancellation run.
+
+### The mechanism
+
+`graph.compile(..., interrupt_before=["tools"])` makes the graph stop before the `tools` node and save a checkpoint. `chat()` inspects the pending tool call; if it's `cancel_order`, a human must answer. Anything else is auto-resumed with `app.invoke(None, config)`, which means "continue from the checkpoint."
+
+### The rule
+
+- A line in the system prompt is a **request**. The model usually complies, and sometimes has a reason not to.
+- `interrupt_before` is **physics**. The `tools` node cannot run until something resumes the graph. The model has no say.
+
+Anything that must never happen without a human — refunds, deletions, payments, outbound emails — gets a code gate. Prompts handle the 99%; interrupts handle the 1% that costs money.
+
+### Verify
+
+```powershell
+python agent_langgraph.py
+# "Cancel order ORD-7783" -> eventually an [approval needed] prompt; answer n -> nothing cancelled
+git checkout data/orders.json   # reset the mock DB after testing
+```
+
 ### What's next
 
-Chapter 4: rebuilding the same loop in LangGraph, and adding memory that survives across turns.
+Chapter 6: replacing the keyword policy lookup with real retrieval (RAG) using a local embedding model and a vector store.
