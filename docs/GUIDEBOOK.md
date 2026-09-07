@@ -54,6 +54,77 @@ git status               # "nothing to commit, working tree clean"
 git ls-files             # must NOT include .env
 ```
 
+---
+
+## Chapter 2 — The agent loop
+
+**Goal:** understand what an "agent" actually is by reading and running `agent_raw.py`, which has no framework in it.
+
+### The loop in plain English
+
+An agent is a model inside a loop with tools. One turn works like this:
+
+1. Send the whole conversation (system prompt + every message so far) to the model, along with a list of tools it may ask for.
+2. Read the reply. If it contains **no tool calls**, the model is done: return its text to the user. Loop ends.
+3. If it contains tool calls, the model is saying "I need information first." For each one, **your Python code** runs the matching function and appends the result to the conversation as a `tool` message.
+4. Go back to step 1. The model now sees the tool results and decides again: answer, or call more tools.
+
+The `MAX_STEPS` guard (8 here) stops the loop if the model never reaches a final answer. It's insurance against runaway loops, which cost money and time.
+
+### Three things that surprised me
+
+- **The model never runs anything.** It only sends back a small JSON note like `{"name": "get_order_status", "arguments": {"order_id": "ORD-7781"}}`. The line `TOOL_FUNCTIONS[name](**args)` in my code is what executes. This is why tools are safe: the model can only request, and I decide what's runnable.
+- **Every loop iteration re-sends the entire conversation.** Tokens add up fast. A question that takes 6 tool calls costs roughly 6× a question that takes 1.
+- **The model extracted `ORD-7781` from my sentence on its own** and put it in the right argument. Nothing in my code parses order IDs; the model does that from the schema description.
+
+### What the first run showed
+
+Order lookup: 1 tool call, correct answer. Cancel flow: the model asked me to confirm before calling `cancel_order`, waited for "yes", then called it. That behaviour came entirely from one line in the system prompt.
+
+Earbuds question: **8 tool calls, then the step limit, then a generic error.** See Chapter 3.
+
+Note: `cancel_order` writes to `data/orders.json`. After testing, reset it with `git checkout data/orders.json`.
+
+---
+
+## Chapter 3 — Tool design: the model only knows what your tools tell it
+
+**Goal:** fix the earbuds failure by changing the tool, not the model or the prompt.
+
+### What went wrong
+
+`search_products("wireless earbuds")` found the SoundPod earbuds, which are out of stock. The system prompt says "suggest an alternative," so the model searched again: headphones, earphones, Bluetooth speaker. Each search returned `"No products matched."`. That string gives the model nothing to work with, so it kept trying until `MAX_STEPS` stopped it.
+
+Analogy: the model is a new employee at the service desk who can't see the warehouse. Tools are phone calls to the warehouse. If the warehouse only ever says "no," the employee keeps calling with different words.
+
+### The fix, in two rounds
+
+**Round 1:** when a search finds nothing and a category was given, return the whole category instead of "No products matched." Result: 6 tool calls and a correct answer. Better, but still slow, because an *out-of-stock hit* never reached the fallback, and searches with no category had no fallback at all.
+
+**Round 2:** rewrite `search_products` to always return two lists in one pass over the CSV: `matches` (what was asked for, in or out of stock) and `in_stock_alternatives` (up to 3 in-stock items in the same category). Also add a `note` field in the JSON telling the model to suggest from the alternatives and not search again. Result: **1 tool call and a correct answer.**
+
+### The principle
+
+The model cannot be smarter than what the tools return. When an agent loops, hallucinates, or gives up, check the tool output first. Most "the model is behaving badly" bugs are "the tool starved the model" bugs. A good tool answers the question *and* the obvious follow-up in a single call.
+
+Two techniques used here that are standard practice:
+- Return structured JSON with named fields, not free text, so the model can't misread it.
+- Put short instructions inside tool output (`"note": "..."`). Models read tool results as carefully as the prompt.
+
+### Mistakes made
+
+- My first test query, `'bluetooth speaker'`, accidentally matched "Bluetooth 5" in a product description, so it didn't test the no-match path at all. Lesson: confirm the test actually exercises the case you think it does. A clean no-match query was `'laptop'`.
+- An `IndentationError` from pasting the block at the wrong indent level. Fixed by aligning it with the line above.
+- Ran the agent without restarting it after editing `tools.py`, so the old code was still loaded. Python reads a file once at startup; every code change needs a restart.
+
+### How to verify
+
+```powershell
+python -c "from tools import search_products; print(search_products('laptop', category='electronics'))"
+# expect: matches: [], in_stock_alternatives: [PulseBand]
+python agent_raw.py   # "Do you have wireless earbuds?" -> exactly one [tool] line
+```
+
 ### What's next
 
-Chapter 2: the agent loop. Reading `agent_raw.py` line by line to understand how a model decides to call a tool, how the result gets fed back, and why there's a `MAX_STEPS` guard.
+Chapter 4: rebuilding the same loop in LangGraph, and adding memory that survives across turns.
