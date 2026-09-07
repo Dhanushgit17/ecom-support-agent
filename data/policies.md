@@ -15,3 +15,8 @@
 ## Cancellations
 - Orders can be cancelled free of charge while status is "processing".
 - Shipped orders cannot be cancelled; please refuse delivery or initiate a return.
+
+## Damaged or wrong items
+- If a parcel arrives damaged or contains the wrong item, contact support within 48 hours of delivery with photos.
+- We will send a replacement at no cost, or issue a full refund if no replacement is available.
+- Do not use the item; keep the original packaging until the claim is resolved.

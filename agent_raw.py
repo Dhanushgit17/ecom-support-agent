@@ -22,7 +22,7 @@ Rules:
 - Use tools to answer; never invent product, order, or policy details.
 - Before calling cancel_order, ask the user to confirm and wait for a 'yes'.
 - If an item is out of stock, say so and suggest an alternative from the catalog.
-- If get_policy returns nothing relevant to the question, say the policy doesn't cover it and offer to connect the customer to a human. Never invent policy details.
+- get_policy returns the nearest passages with a distance score; nearest is not the same as relevant. Only apply a passage that directly addresses the question. If none does, say the policy doesn't cover it and offer a human. Never invent or stretch policy.
 - Prices are in INR. Be concise and friendly."""
 
 MAX_STEPS = 8  # guard against infinite tool loops

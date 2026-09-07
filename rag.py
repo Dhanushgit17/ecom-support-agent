@@ -47,16 +47,16 @@ def ensure_index() -> None:
 
 
 def retrieve_policy(question: str, k: int = 3) -> str:
-    """Return the k most relevant policy passages for a question."""
+    """Return the k most relevant policy passages, with a distance score (lower = closer)."""
     ensure_index()
     col = _client.get_collection("policies")
-    res = col.query(query_texts=[question], n_results=k)
-    passages = res["documents"][0]
-    return "\n\n".join(f"- {p}" for p in passages) if passages else "No policy found."
+    res = col.query(query_texts=[question], n_results=k, include=["documents", "distances"])
+    pairs = zip(res["documents"][0], res["distances"][0])
+    return "\n\n".join(f"- (distance {d:.2f}) {p}" for p, d in pairs) or "No policy found."
 
 
 if __name__ == "__main__":
     n = build_index()
     print(f"Indexed {n} chunks.")
-    for q in ["can I send shoes back after wearing them?", "how long does delivery take?", "I want to stop my order"]:
+    for q in ["can I send shoes back after wearing them?", "how long does delivery take?", "I want to stop my order", "what happens if my parcel arrives damaged?"]:
         print(f"\nQ: {q}\n{retrieve_policy(q)}")

@@ -193,6 +193,57 @@ python agent_langgraph.py
 git checkout data/orders.json   # reset the mock DB after testing
 ```
 
+---
+
+## Chapter 6 — RAG: retrieval, and where it fails
+
+**Goal:** replace the keyword policy lookup with semantic search, wire it into the agent, and see two kinds of hallucination up close.
+
+### Why keyword lookup wasn't enough
+
+`get_policy("returns")` only worked because the policy file had three neat headings and the model guessed the heading name. "Send it back" contains neither "return" nor any heading. And real policy docs are 40 pages; you can't paste them into every prompt.
+
+### The three moves
+
+1. **Chunk.** Split the document into small passages. After a bug, one chunk per bullet, prefixed with its section heading (`"Returns: Footwear must be tried on carpet only..."`). The prefix gives both the embedder and the LLM context that a bare bullet lacks.
+2. **Embed.** Each chunk goes through an embedding model (all-MiniLM, 79 MB, runs on CPU, bundled with ChromaDB) and becomes a vector of numbers. Similar meaning → nearby vectors. No Ollama needed.
+3. **Retrieve.** Embed the question the same way, return the 3 nearest chunks. ChromaDB is a database whose one job is "find the nearest vectors fast."
+
+Proof it works: "I want to stop my order" retrieved the Cancellations section with zero shared words.
+
+### Files
+
+- `rag.py`: `chunk_markdown`, `build_index`, `ensure_index`, `retrieve_policy`. Index stored on disk in `chroma_db/` (gitignored).
+- `tools.py`: `get_policy(question)` now just calls `retrieve_policy`. Schema updated from `topic` to `question`.
+- `agent_raw.py`: API call wrapped in `try/except` for malformed tool calls; `[result]` print added.
+
+### Bugs, in order
+
+1. **Chunker returned zero chunks.** It split on blank lines and assumed a blank line after each heading; the file had none, so every block started with `## ` and was skipped. *Lesson: chunking is where most RAG systems quietly fail. Print the chunks before indexing.*
+2. **Schema and function disagreed.** Schema said `question`, function still said `topic`. Every call returned `Tool error: unexpected keyword argument`. Invisible until the `[result]` print was added. *Lesson: always log what tools return.*
+3. **Model emitted a malformed tool call** (`query` instead of `question`). Groq rejected it with a 400 and the agent crashed. Fixed by catching `groq.BadRequestError` with `tool_use_failed`, telling the model to retry. *Lesson: malformed tool calls happen; the loop must survive them.*
+
+### Two hallucinations
+
+**Hard hallucination.** While `get_policy` was broken, the model invented a complete damaged-parcel policy: 48-hour window, photos, replacement or refund. Plausible, confident, entirely made up. Cause: tools gave it nothing, so it filled the gap.
+
+**Soft hallucination.** With RAG working, the same question retrieved three Returns bullets (distance ~1.18) because they were the *nearest* chunks. The model stretched the returns policy to cover damaged parcels. Everything it said was in the document; none of it applied.
+
+### What was tried, and what worked
+
+- **Distance threshold:** looked at the numbers. Covered questions scored 0.90, 0.92, 1.15; the uncovered one scored 1.18. A gap of 0.03 can't be thresholded. Kept the scores in the tool output as a signal, dropped the idea of a cutoff.
+- **Sharper prompt rule** ("nearest is not the same as relevant"): the model still stretched the policy. Prompt engineering hit its ceiling here.
+- **Fix the document:** added a "Damaged or wrong items" section, rebuilt the index. Distance dropped from 1.18 to 0.64 and the answer was correct. This is what happens in real companies: RAG logs reveal unanswered questions, the content team fills the gap.
+
+Two options parked for later: a grading step (a cheap second model call that drops irrelevant passages, sometimes called corrective RAG), and fine-tuning a model to say "not covered" instead of stretching. The damaged-parcel case becomes training data for Phase 3.
+
+### Verify
+
+```powershell
+python rag.py             # rebuilds index, prints 13 chunks with distances
+python agent_raw.py       # "What happens if my parcel arrives damaged?" -> distance ~0.64, correct answer
+```
+
 ### What's next
 
-Chapter 6: replacing the keyword policy lookup with real retrieval (RAG) using a local embedding model and a vector store.
+Chapter 7: evals. Turning every failure from Chapters 2–6 into a test case, so the agent can't silently regress.
