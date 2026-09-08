@@ -323,4 +323,6 @@ git status                    # orders.json must NOT appear as modified after a 
 
 ### What's next
 
-Push to GitHub (`master` → `main`), write the README, then Phase 2: wrap the agent in a FastAPI endpoint so something other than a terminal can talk to it.
+Phase 1 is complete: project moved to `C:\projects\ecom-support-agent`, branch renamed `master` → `main`, pushed to GitHub, README rewritten.
+
+Chapter 8: FastAPI. Wrapping the agent in a web endpoint so something other than a terminal can call it — a URL that takes a question and returns JSON. That's the boundary where sessions, concurrent users, and not leaking stack traces start to matter.
