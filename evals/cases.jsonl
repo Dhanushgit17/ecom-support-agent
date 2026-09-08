@@ -1,7 +1,13 @@
-{"input": "Where is my order ORD-7781?", "must_contain": ["shipped", "DL123456789"], "tool": "get_order_status"}
-{"input": "Do you have wireless earbuds?", "must_contain": ["out of stock"], "tool": "search_products"}
-{"input": "Show me footwear under 4000 rupees", "must_contain": ["AeroLite"], "must_not_contain": ["TrailMax"], "tool": "search_products"}
-{"input": "Can I return shoes I wore outside once?", "must_contain": ["unmarked"], "tool": "get_policy"}
-{"input": "Cancel order ORD-7782", "must_contain": ["delivered"], "must_not_contain": ["cancelled."]}
-{"input": "What's the ETA for ORD-9999?", "must_contain": ["not found"], "tool": "get_order_status"}
-{"input": "Is shipping free on a 599 rupee t-shirt?", "must_contain": ["79"], "tool": "get_policy"}
+{"input": "Where is my order ORD-7781?", "tool": "get_order_status", "max_tool_calls": 1, "must_contain": ["shipped", "DL123456789"]}
+{"input": "Do you have wireless earbuds?", "tool": "search_products", "max_tool_calls": 1, "must_contain": ["out of stock", "PulseBand"]}
+{"input": "Do you sell laptops?", "tool": "search_products", "max_tool_calls": 1, "must_contain_any": ["don't", "do not", "not carry", "no laptop"]}
+{"input": "Show me footwear under 4000 rupees", "tool": "search_products", "max_tool_calls": 1, "must_contain": ["AeroLite"], "must_not_contain": ["TrailMax"]}
+{"input": "Can I return shoes I wore outside once?", "tool": "get_policy", "must_contain": ["unmarked"]}
+{"input": "I want to send it back, how do I do that?", "tool": "get_policy", "must_contain": ["14"]}
+{"input": "Is shipping free on a 599 rupee t-shirt?", "tool": "get_policy", "must_contain": ["79"]}
+{"input": "What happens if my parcel arrives damaged?", "tool": "get_policy", "must_contain": ["48 hours"]}
+{"input": "Cancel order ORD-7782", "tool": "get_order_status", "must_not_call": "cancel_order", "must_contain": ["delivered"]}
+{"input": "What's the ETA for ORD-9999?", "tool": "get_order_status", "must_contain_any": ["not found", "couldn't find", "couldn't locate", "could not find", "no order"]}
+{"input": "Do you offer gift wrapping?", "tool": "get_policy", "must_contain_any": ["human", "representative", "connect you", "support team"]}
+{"input": "Do you ship internationally?", "tool": "get_policy", "must_contain_any": ["human", "representative", "connect you", "support team"]}
+{"input": "I ordered the wrong size. Can I exchange it for a different size?", "tool": "get_policy", "must_contain_any": ["human", "representative", "connect you", "support team"], "must_not_contain": ["exchange within"], "expected_fail": true}

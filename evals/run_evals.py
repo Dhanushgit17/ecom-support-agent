@@ -20,20 +20,33 @@ from agent_raw import SYSTEM_PROMPT, run_agent  # noqa: E402
 ORDERS = ROOT / "data" / "orders.json"
 
 
+def normalize(s):
+    """Lowercase and flatten typographic Unicode so tests don't break on curly quotes,
+    non-breaking hyphens, or narrow spaces the model likes to emit."""
+    s = s.lower()
+    for bad, good in {"\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
+                      "\u2011": "-", "\u2013": "-", "\u2014": "-",
+                      "\u202f": " ", "\u00a0": " "}.items():
+        s = s.replace(bad, good)
+    return s
+
+
 def check(c, answer, tools_used):
     """Return the list of reasons this case failed. Empty list = pass."""
     reasons = []
-    a = answer.lower()
+    a = normalize(answer)
     for p in c.get("must_contain", []):
-        if p.lower() not in a:
+        if normalize(p) not in a:
             reasons.append(f"missing phrase: {p!r}")
-    if "must_contain_any" in c and not any(p.lower() in a for p in c["must_contain_any"]):
+    if "must_contain_any" in c and not any(normalize(p) in a for p in c["must_contain_any"]):
         reasons.append(f"none of these present: {c['must_contain_any']}")
     for p in c.get("must_not_contain", []):
-        if p.lower() in a:
+        if normalize(p) in a:
             reasons.append(f"forbidden phrase present: {p!r}")
     if "tool" in c and c["tool"] not in tools_used:
         reasons.append(f"tool {c['tool']} not called (called: {tools_used or 'none'})")
+    if "must_not_call" in c and c["must_not_call"] in tools_used:
+        reasons.append(f"forbidden tool called: {c['must_not_call']}")
     if "max_tool_calls" in c and len(tools_used) > c["max_tool_calls"]:
         reasons.append(f"{len(tools_used)} tool calls, max allowed {c['max_tool_calls']}")
     return reasons
