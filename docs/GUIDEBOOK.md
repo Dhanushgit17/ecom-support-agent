@@ -246,6 +246,81 @@ python rag.py             # rebuilds index, prints 13 chunks with distances
 python agent_raw.py       # "What happens if my parcel arrives damaged?" -> distance ~0.64, correct answer
 ```
 
+## Chapter 7 — Evals: turning every bug into a test
+
+**Goal:** make it impossible for the agent to regress silently. Every failure from Chapters 2–6 becomes a test case, the suite runs in one command, and a non-zero exit code means something broke.
+
+### Why an agent needs a different kind of test
+
+An n8n workflow is deterministic: same input, same output, so "did it work" is a yes/no. An LLM agent gives different words every run. Across four runs of this suite, "order not found" came back as *couldn't find*, *couldn't locate*, *couldn't find any order*. A test that checks the exact wording fails for cosmetic reasons and teaches you nothing.
+
+So the tests check **behaviour**, cheapest first:
+
+1. **Which tools were called.** Pure data. `get_order_status` was either in the list or it wasn't.
+2. **How many calls it took.** Chapter 3's fix went from 8 tool calls to 1. Nothing else would notice if it crept back to 6, because the *answer* would still be right. `max_tool_calls: 1` on every product and order case is that fix, locked in.
+3. **What the answer contains.** Substrings from the source data (`products.csv`, `orders.json`, `policies.md`). Crude, but free and instant.
+
+Checks 1 and 2 are the ones that tell you *where in the loop* it went wrong. Most people only write check 3 and then can't diagnose a failure.
+
+### Files
+
+- `evals/cases.jsonl`: 13 cases, one JSON object per line. Fields: `input`, `tool`, `must_not_call`, `max_tool_calls`, `must_contain`, `must_contain_any`, `must_not_contain`, `expected_fail`.
+- `evals/run_evals.py`: runs each case against `agent_raw.run_agent` with a fresh history, collects the tool calls from the message list, and prints PASS / FAIL / XFAIL / XPASS with a reason line for every failure. Exits 1 if any real case fails.
+
+Evals run against `agent_raw.py`, not the LangGraph version, because `interrupt_before` would sit waiting for a human on every cancel case.
+
+### Three things the runner does that a first draft wouldn't
+
+**Reasons, not booleans.** `check()` returns a list of reasons instead of True/False. `FAIL | Cancel order ORD-7782` on its own means re-reading the answer and guessing. `x tool get_order_status not called (called: none)` means you know.
+
+**Unicode normalisation.** The model emits typographic characters freely: `ORD‑7781` with a non-breaking hyphen (U+2011), `couldn’t` with a curly apostrophe (U+2019), `under ₹4,000` with a narrow no-break space (U+202F). None of these match their ASCII equivalents in a substring test. A 10-line `normalize()` flattens both sides before comparing, and the whole class of bug goes away. Chasing each one in the cases would never end.
+
+**Expected failures.** A case marked `expected_fail: true` reports as XFAIL and does not break the build. If it ever passes, it reports XPASS with a message to remove the flag. A test you keep *because* it fails is a written spec for work you haven't done, plus the before-number you'll measure against later.
+
+Also: `orders.json` is snapshotted before the run and restored in a `finally`, because `cancel_order` writes to it. A suite that mutates its own fixtures is worse than no suite.
+
+### When a test fails, ask which one is wrong
+
+The first run gave 5/7. One failure of each kind:
+
+- **The test was wrong.** "ETA for ORD-9999" demanded the literal phrase `not found`. The agent had called the right tool, got `not found` back, and told the customer *I couldn't find an order with that ID*. Correct behaviour, paraphrased. Fixed the case (`must_contain_any` with several phrasings), not the agent.
+- **The agent was wrong.** "Cancel order ORD-7782" made zero tool calls and asked *would you like to cancel?* — for an order that's already delivered. In Chapter 5 the same prompt had looked the order up first. Same prompt, different run, different behaviour. Fix: one prompt line, *check the order before asking to confirm; if it can't be cancelled, say why*. Test now requires `get_order_status` and forbids `cancel_order`. This was the first eval-driven fix: red → change → green, with a permanent guard.
+
+### The suite corrected the plan
+
+The Phase 3 fine-tuning target was "the model stretches policy instead of saying not-covered". Two uncovered questions went in as expected failures — gift wrapping, international shipping — and **both passed**. The model declined cleanly and offered a human.
+
+Compared with Chapter 6's damaged-parcel failure, the difference wasn't distance (gift wrapping retrieved at 1.42 and was declined; the exchange question below retrieved at 1.39 and was stretched). The difference is whether the retrieved text hands the model a *plausible story*. "Do you ship internationally?" gives it nothing to work with. A customer **in a situation** next to an existing process does:
+
+> *I ordered the wrong size. Can I exchange it for a different size?*
+> → Returns chunks retrieved. Run 1: *"Yes — you can exchange within 14 days, unused, original packaging."* Run 2: *"You can return the item and place a new order."*
+
+Every clause is from the Returns section; none of it is an exchange policy. That case is now the suite's one XFAIL and the first training example for Phase 3. Refined target: **situation question + adjacent process → stretch.** Target answer: acknowledge it isn't covered, state what the policy does allow, hand off to a human.
+
+A second situational case (order 3 days past ETA) was deleted. The agent didn't call any tool; it asked for the order ID. Reasonable customer service, but the case had been written assuming a policy question and the model treated it as an order question. A test that can fail for two unrelated reasons is noise. Lesson: one case, one behaviour.
+
+### Where the checks are weakest
+
+The "not covered" cases are checked by a proxy: did the answer hand off to a human (`human`, `representative`, `connect you`, `support team`)? A stretched answer doesn't hand off; a decline does. It survived four runs but it's still pattern-matching wording. The honest fix is a second model call that grades the answer against a rubric — an LLM judge. That arrives in Step 13, where the whole before/after comparison rests on this one behaviour.
+
+The harness is also single-turn. Chapter 5's real bug (skipping confirmation the second time) and "ask for the order ID first" can't be scored without multi-turn cases. Parked.
+
+### Mistakes made
+
+1. **Edited `cases.jsonl` and didn't save.** The suite ran the old 7 cases and I read the results as if they were the new ones. Caught because 7 ran instead of 11. *Rule:* `git status` before every run; the file you edited must be listed as modified.
+2. **Pasted the prompt into the Python REPL.** Shift+Enter in VS Code sends selected code to an interactive `>>>` shell, not the file. Harmless — nothing on disk changed — but confusing. `exit()` gets out.
+3. **Three lines missing their closing `}`.** JSONL has no forgiveness; one bad line kills the run before any case executes. Cheap check before running the agent: `python -c "import json; [json.loads(l) for l in open('evals/cases.jsonl') if l.strip()]; print('ok')"`.
+4. **Dropped `expected_fail` while editing a line.** Would have turned a known failure into a build breaker.
+5. **Filled a `must_contain` from the agent's output instead of the policy file.** Nearly — the `[result]` line showed the chunk straight from `policies.md`, so `48 hours` was source data after all. *Rule:* expected values come from the data files, never from the answer. Otherwise you're asserting "the agent does what the agent does."
+
+### Verify
+
+```powershell
+python -c "import json; [json.loads(l) for l in open('evals/cases.jsonl') if l.strip()]; print('ok')"
+python evals/run_evals.py     # 12 passed, 0 failed, 1 expected failures, 0 unexpected passes
+git status                    # orders.json must NOT appear as modified after a run
+```
+
 ### What's next
 
-Chapter 7: evals. Turning every failure from Chapters 2–6 into a test case, so the agent can't silently regress.
+Push to GitHub (`master` → `main`), write the README, then Phase 2: wrap the agent in a FastAPI endpoint so something other than a terminal can talk to it.
