@@ -1,24 +1,77 @@
 """
-STEP 5: Minimal eval harness. Run after every change: python evals/run_evals.py
-Scores each case on: correct tool called + required phrases present.
+Eval harness. Run after every change:  python evals/run_evals.py
+
+Each case in cases.jsonl may have:
+  input              the user message
+  tool               a tool that must have been called
+  max_tool_calls     upper bound on tool calls (catches loops)
+  must_contain       phrases that must ALL appear in the answer
+  must_contain_any   at least ONE of these must appear
+  must_not_contain   phrases that must NOT appear
+  expected_fail      true = known failure; reported as XFAIL, does not break the build
 """
 import json, sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
+ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT))
 from agent_raw import SYSTEM_PROMPT, run_agent  # noqa: E402
 
-cases = [json.loads(l) for l in open(Path(__file__).parent / "cases.jsonl")]
-passed = 0
-for c in cases:
-    history = [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": c["input"]}]
-    answer = run_agent(history).lower()
-    tools_used = [tc["function"]["name"] for m in history if m.get("tool_calls") for tc in m["tool_calls"]]
-    ok = all(p.lower() in answer for p in c.get("must_contain", []))
-    ok &= not any(p.lower() in answer for p in c.get("must_not_contain", []))
-    if "tool" in c:
-        ok &= c["tool"] in tools_used
-    passed += ok
-    print(f"{'PASS' if ok else 'FAIL'} | {c['input']}\n      -> {answer[:120]}")
-print(f"\n{passed}/{len(cases)} passed")
-sys.exit(0 if passed == len(cases) else 1)
+ORDERS = ROOT / "data" / "orders.json"
+
+
+def check(c, answer, tools_used):
+    """Return the list of reasons this case failed. Empty list = pass."""
+    reasons = []
+    a = answer.lower()
+    for p in c.get("must_contain", []):
+        if p.lower() not in a:
+            reasons.append(f"missing phrase: {p!r}")
+    if "must_contain_any" in c and not any(p.lower() in a for p in c["must_contain_any"]):
+        reasons.append(f"none of these present: {c['must_contain_any']}")
+    for p in c.get("must_not_contain", []):
+        if p.lower() in a:
+            reasons.append(f"forbidden phrase present: {p!r}")
+    if "tool" in c and c["tool"] not in tools_used:
+        reasons.append(f"tool {c['tool']} not called (called: {tools_used or 'none'})")
+    if "max_tool_calls" in c and len(tools_used) > c["max_tool_calls"]:
+        reasons.append(f"{len(tools_used)} tool calls, max allowed {c['max_tool_calls']}")
+    return reasons
+
+
+def main():
+    cases = [json.loads(l) for l in open(Path(__file__).parent / "cases.jsonl") if l.strip()]
+    snapshot = ORDERS.read_bytes()  # cancel_order writes here; restored after the run
+    passed = failed = xfail = xpass = 0
+    try:
+        for c in cases:
+            history = [{"role": "system", "content": SYSTEM_PROMPT},
+                       {"role": "user", "content": c["input"]}]
+            answer = run_agent(history)
+            tools_used = [tc["function"]["name"] for m in history
+                          if m.get("tool_calls") for tc in m["tool_calls"]]
+            reasons = check(c, answer, tools_used)
+            ok = not reasons
+            if c.get("expected_fail"):
+                tag = "XPASS" if ok else "XFAIL"
+                xpass += ok
+                xfail += not ok
+            else:
+                tag = "PASS" if ok else "FAIL"
+                passed += ok
+                failed += not ok
+            print(f"{tag} | {c['input']}   [{len(tools_used)} tool calls]")
+            for r in reasons:
+                print(f"      x {r}")
+            print(f"      -> {answer[:120]!r}")
+    finally:
+        ORDERS.write_bytes(snapshot)
+
+    print(f"\n{passed} passed, {failed} failed, {xfail} expected failures, {xpass} unexpected passes")
+    if xpass:
+        print("XPASS means a known failure now passes: remove its expected_fail flag so it becomes a real test.")
+    sys.exit(0 if failed == 0 else 1)
+
+
+if __name__ == "__main__":
+    main()
