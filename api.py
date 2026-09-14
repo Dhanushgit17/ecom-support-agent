@@ -1,34 +1,31 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from agent_raw import run_agent, SYSTEM_PROMPT
+from agent_langgraph import app as graph
+from langchain_core.messages import HumanMessage
 
-app = FastAPI(title="E-commerce Support Agent")
+api = FastAPI(title="E-commerce Support Agent")
 
 
 class ChatRequest(BaseModel):
     message: str
+    thread_id: str = "default"
 
 
-@app.get("/health")
+@api.get("/health")
 def health():
     return {"status": "ok"}
 
 
-@app.post("/chat")
+@api.post("/chat")
 def chat(req: ChatRequest):
-    history = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": req.message},
-    ]
+    config = {"configurable": {"thread_id": req.thread_id}}
 
-    answer = run_agent(history)
+    result = graph.invoke({"messages": [HumanMessage(content=req.message)]}, config)
 
-    tool_calls = [
-        tc["function"]["name"]
-        for m in history
-        if m.get("tool_calls")
-        for tc in m["tool_calls"]
-    ]
+    # Auto-resume through interrupts. NO approval gate yet -- see Task 8.4.
+    while graph.get_state(config).next:
+        result = graph.invoke(None, config)
 
-    return {"answer": answer, "tool_calls": tool_calls}
+    last = result["messages"][-1]
+    return {"answer": last.content, "thread_id": req.thread_id}
