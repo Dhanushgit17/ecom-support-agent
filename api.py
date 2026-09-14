@@ -6,10 +6,51 @@ from langchain_core.messages import HumanMessage
 
 api = FastAPI(title="E-commerce Support Agent")
 
+NEEDS_APPROVAL = {"cancel_order"}
+
 
 class ChatRequest(BaseModel):
     message: str
     thread_id: str = "default"
+
+
+class ApproveRequest(BaseModel):
+    thread_id: str
+    approved: bool
+
+
+def pending_tool_names(config):
+    """Names of the tool calls the graph is paused before, or [] if not paused."""
+    state = graph.get_state(config)
+    if not state.next:
+        return []
+    return [tc["name"] for tc in state.values["messages"][-1].tool_calls]
+
+
+def run_until_done_or_approval(config, first_input):
+    """Resume the graph, stopping if a tool needs human approval."""
+    result = graph.invoke(first_input, config)
+
+    while True:
+        pending = pending_tool_names(config)
+        if not pending:
+            break
+        risky = [n for n in pending if n in NEEDS_APPROVAL]
+        if risky:
+            return {
+                "answer": f"I need your approval before I run: {', '.join(risky)}.",
+                "thread_id": config["configurable"]["thread_id"],
+                "needs_approval": True,
+                "pending_tool": risky[0],
+            }
+        result = graph.invoke(None, config)
+
+    return {
+        "answer": result["messages"][-1].content,
+        "thread_id": config["configurable"]["thread_id"],
+        "needs_approval": False,
+        "pending_tool": None,
+    }
 
 
 @api.get("/health")
@@ -20,12 +61,30 @@ def health():
 @api.post("/chat")
 def chat(req: ChatRequest):
     config = {"configurable": {"thread_id": req.thread_id}}
+    return run_until_done_or_approval(
+        config, {"messages": [HumanMessage(content=req.message)]}
+    )
 
-    result = graph.invoke({"messages": [HumanMessage(content=req.message)]}, config)
 
-    # Auto-resume through interrupts. NO approval gate yet -- see Task 8.4.
-    while graph.get_state(config).next:
-        result = graph.invoke(None, config)
+@api.post("/approve")
+def approve(req: ApproveRequest):
+    config = {"configurable": {"thread_id": req.thread_id}}
 
-    last = result["messages"][-1]
-    return {"answer": last.content, "thread_id": req.thread_id}
+    pending = pending_tool_names(config)
+    if not pending:
+        return {
+            "answer": "There is nothing waiting for approval on this thread.",
+            "thread_id": req.thread_id,
+            "needs_approval": False,
+            "pending_tool": None,
+        }
+
+    if not req.approved:
+        graph.update_state(
+            config,
+            {"messages": [HumanMessage(content="I do not approve that action. Do not run it.")]},
+            as_node="tools",
+        )
+        return run_until_done_or_approval(config, None)
+
+    return run_until_done_or_approval(config, None)
