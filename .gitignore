@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 checkpoints.db
 chroma_db/
+checkpoints.db-shm
+checkpoints.db-wal
