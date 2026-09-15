@@ -1,0 +1,44 @@
+name: Evals
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate cases.jsonl
+        run: |
+          python -c "import json; [json.loads(l) for l in open('evals/cases.jsonl') if l.strip()]; print('cases.jsonl is valid')"
+
+      - name: Build the RAG index
+        run: python rag.py
+
+      - name: Run evals
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          MODEL: openai/gpt-oss-120b
+        run: python evals/run_evals.py
+
+      - name: Check the mock data was restored
+        run: |
+          git diff --exit-code data/orders.json
