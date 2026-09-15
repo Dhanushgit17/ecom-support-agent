@@ -321,8 +321,241 @@ python evals/run_evals.py     # 12 passed, 0 failed, 1 expected failures, 0 unex
 git status                    # orders.json must NOT appear as modified after a run
 ```
 
+## Chapter 8 — FastAPI: the agent becomes a URL
+
+**Goal:** wrap the agent in a web endpoint so something other than a terminal can call it. A URL that takes a question and returns JSON.
+
+**Time taken:** two sessions. Roughly a third of it was a broken virtual environment that had nothing to do with FastAPI.
+
+### Why this step exists
+
+Everything up to Chapter 7 only works if a human is sitting at the keyboard typing into `input()`. That agent cannot be put on the internet, cannot be called by a web page, and cannot be used by anyone else. Step 9 (Gradio UI) and Step 10 (Hugging Face Spaces) both need something that speaks HTTP.
+
+The n8n equivalent: a workflow on a laptop is useless to anyone else, but a **Webhook node** gives it a URL and suddenly anything can trigger it. This chapter is that node, written by hand in Python.
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `api.py` | Three endpoints: `/health`, `/chat`, `/approve`. Imports the LangGraph agent; changes nothing inside it. |
+| `requirements.txt` | Added `fastapi` and `uvicorn[standard]`. |
+| `.gitignore` | Added `checkpoints.db-shm` and `checkpoints.db-wal`. |
+
+The agent itself was not modified. `tools.py`, `agent_raw.py`, `agent_langgraph.py`, and `rag.py` are untouched by this chapter. That's the point: the API is a wrapper, not a rewrite.
+
+### Concepts, in plain English
+
+**Server vs script.** `python agent_raw.py` runs, does a thing, and exits. `uvicorn api:api --reload` starts and *does not return the terminal* — it sits there listening on port 8000 until killed. That's the whole difference between a script and a server. Ctrl+C stops it, and here Ctrl+C is what you actually want (unlike Chapter 1, where it cancelled a pip install by accident).
+
+**`api:api` means "in the file `api.py`, find the variable named `api`."** The command changed from `api:app` to `api:api` mid-step because the FastAPI object had to be renamed: `agent_langgraph.py` already uses `app` for the compiled graph, and importing it as `app` into a file that also had a FastAPI `app` would collide. So the graph is imported as `graph` and the FastAPI object is `api`.
+
+**GET vs POST.** A browser URL bar can only send GET requests, and GET puts its data in the URL itself. Customer questions can be long, contain `?` and `&`, and shouldn't sit in browser history and server logs. POST carries data in the request *body*. Rule of thumb: GET to read something, POST to do something. Running an agent is doing something. This is also why `/docs` became the testing tool instead of the address bar.
+
+**`/docs` is free.** FastAPI generates an interactive test page from the code itself. Expand an endpoint, click "Try it out", fill in the body, Execute. It also shows the raw `curl` command it sent, which is exactly what Gradio will be doing in Step 9. Be careful: the Curl box shows the request that *will* be sent, not the result. The result is further down under **Server response**.
+
+**Status codes seen, in order of how often they'll matter:**
+
+| Code | Meaning | Where it turned up |
+|---|---|---|
+| 200 | Worked | Every successful request |
+| 404 | No route matches that path | The browser silently asking for `/favicon.ico` on every page load — never a bug |
+| 422 | Route exists, request body was the wrong shape | Sent an approval body to `/chat` by accident |
+| 500 | Route exists, body was fine, the code blew up | Deliberately, with a broken API key |
+
+Knowing 404 from 422 from 500 means knowing whether the problem is the URL, the caller, or the code — from the one log line, before reading anything else.
+
+### The four problems, and what each fix was
+
+Four things break the moment the caller stops being a human at a keyboard.
+
+#### 1. The conversation gets forgotten
+
+The first version of `/chat` built a fresh `history` list inside the function on every request. Python creates it, `run_agent` fills it, the function returns, Python throws it away.
+
+The result was worth seeing:
+
+> **Q:** "Where is my order ORD-7781?" → correct answer, `tool_calls: ["get_order_status"]`
+> **Q:** "What did I just ask you?" → *"You just asked me, 'What did I just ask you?'"*
+
+The model isn't confused there. It's answering honestly — that one message is the entire conversation it can see.
+
+**Fix:** switch from `agent_raw` to the LangGraph app and add one field to the request body.
+
+```json
+{"message": "...", "thread_id": "user-1"}
+```
+
+`thread_id` is the conversation's name. Chapter 4 already built every part of this — `SqliteSaver`, `checkpoints.db`, threads — it just had never been called by anything but a terminal. In Step 9 the UI will generate a thread id per browser session; in a real system it's the logged-in user's id. The API doesn't care, it's just a string.
+
+**Proof it works:** killed the server completely, restarted it, asked *"What was that order number again?"* on `user-1` → **"The order you were asking about is ORD-7781."** That answer came off the disk. The process that learned it was dead.
+
+#### 2. Two customers at once
+
+Same question, `thread_id: "user-2"` → total amnesia. `user-2` has never spoken to this agent.
+
+No code handles concurrency here. It works because **nothing is stored in the Python process at all** — state lives in SQLite, keyed by thread. The tempting wrong fix (a `conversations = {}` dictionary at the top of `api.py`) would work on a laptop for about a day, then die on restart, break with two server processes, and grow until memory ran out. Chapter 4's `MemorySaver` lesson, one layer up.
+
+#### 3. Nobody is there to type "y"
+
+The interesting one. `agent_langgraph.chat()` contains:
+
+```python
+ok = input(f"  [approval needed] run {pending}? (y/n): ")
+```
+
+In a terminal that's fine. In a web server there is **nobody at that keyboard** — the request blocks until it times out. So `api.py` doesn't import `chat()`; it has its own resume logic. The terminal version and the web version genuinely need different behaviour at the interrupt.
+
+**The fix:** an HTTP request cannot pause and wait for a human, so the conversation splits across two requests.
+
+1. `POST /chat` → the graph hits `interrupt_before=["tools"]` and freezes → the response says `needs_approval: true` and **the request ends**. Server goes idle.
+2. *(time passes — five seconds or five hours, it doesn't matter)*
+3. `POST /approve` with `{"approved": true/false}` → the frozen conversation resumes or the pending call is discarded.
+
+Between those two requests the half-finished conversation is sitting in `checkpoints.db` on disk. Chapter 4 listed "pausing — a hard stop before a risky tool, resumable later" as a reason to use a graph. This is the first place it's actually load-bearing.
+
+**Response shape**, designed before the code was written, so Step 9's UI has something to switch on:
+
+```json
+{
+  "answer": "I need your approval before I run: cancel_order.",
+  "thread_id": "approve-test",
+  "needs_approval": true,
+  "pending_tool": "cancel_order"
+}
+```
+
+`needs_approval` is a boolean the UI checks to decide "render a message" or "render a Yes/No prompt". A UI parsing English text to work that out would be a bug waiting to happen.
+
+**The rejection path** is the subtle bit:
+
+```python
+graph.update_state(config, {"messages": [...refusal...]}, as_node="tools")
+```
+
+That writes a message into the graph *as if the tools node had produced it*, which discards the pending tool call. The graph then continues to the agent node, the model sees the refusal, and explains itself to the customer. Chapter 5's `n` answer, expressed over HTTP.
+
+#### 4. Bad input and crashes reach the caller
+
+**Bad input** is handled by Pydantic for free. `class ChatRequest(BaseModel)` declares that the body must have a `message` string; FastAPI validates against it and rejects mismatches with a 422 **before the endpoint function runs**, naming the exact field:
+
+```json
+{"detail": [{"type": "missing", "loc": ["body", "message"], "msg": "Field required"}]}
+```
+
+**Crashes** needed real work. Without a handler, an exception returns a full stack trace to whoever asked: file paths, folder structure, package versions, sometimes local variable contents. On a public server that's an information leak.
+
+The rule: **the server sees everything, the caller sees almost nothing, and an id links the two.**
+
+```python
+def server_error(where: str, thread_id: str):
+    error_id = uuid.uuid4().hex[:8]
+    logger.exception("%s failed [%s] thread=%s", where, error_id, thread_id)
+    return HTTPException(
+        status_code=500,
+        detail=f"Something went wrong. Reference: {error_id}",
+    )
+```
+
+Tested by setting `GROQ_API_KEY=gsk_invalid` and restarting. The browser got 54 bytes:
+
+```json
+{"detail": "Something went wrong. Reference: bfae1768"}
+```
+
+The server log got the full traceback, headed `chat failed [bfae1768] thread=err-test-5` and ending in `groq.AuthenticationError: Error code: 401 - 'Invalid API Key'`. A customer reads eight characters down the phone; you search the logs for them and land on the exact failure.
+
+`logger.exception()` only works inside an `except` block — that's how it knows which traceback to print.
+
+### Prompts shape, code enforces — confirmed again
+
+The first cancel attempt over HTTP came back `needs_approval: false`, with the agent saying:
+
+> *"I see that order ORD-7783 is still processing, so it can be cancelled. Please reply with **yes** if you'd like me to go ahead and cancel it."*
+
+The **model** asked for confirmation, following the system prompt, and never requested the tool — so the graph never paused and the code gate never fired. It took a second message ("yes") before `cancel_order` was actually requested, and only then did `needs_approval: true` come back.
+
+That's Chapter 5's rule surviving the move to HTTP intact: a prompt is a request the model usually honours; `interrupt_before` is physics. Chapter 5 already showed the model skipping its own confirmation on a second attempt in the same session. The gate is what doesn't depend on the model's cooperation.
+
+### Testing the gate in both directions
+
+A gate that blocks everything looks identical to a working gate, right up until a real customer needs a real cancellation. So both paths were run, and **both were verified against the file on disk, not against what the agent said**:
+
+| Test | Agent said | `git status` |
+|---|---|---|
+| `{"approved": false}` | *"Understood—I won't cancel the order."* | `data/orders.json` **not** modified |
+| `{"approved": true}` | *"Your order ORD-7783 has been cancelled successfully."* | `data/orders.json` **modified** |
+
+Chapter 6's lesson is why this matters: the model will say plausible things regardless of what actually happened. `git checkout data/orders.json` resets the mock DB afterwards, as always.
+
+### Mistakes made, and the lesson from each
+
+1. **A virtual environment cannot be moved.** Moving the project to `C:\projects\` in Step 7 broke `pip` with an error naming the *old* Downloads path. On Windows, installing a CLI tool into a venv creates a tiny `.exe` launcher with the absolute path to that venv's `python.exe` baked inside it. Move the folder and every launcher points at a path that no longer exists. Activation still worked, because `Activate.ps1` computes its own location at runtime; only the `.exe` shims are frozen.
+   *Rule:* never move a venv. Delete it and rebuild: `deactivate`, `Remove-Item -Recurse -Force .venv`, `py -m venv .venv`, activate, `pip install -r requirements.txt`.
+   *Silver lining:* the rebuild proved `requirements.txt` can reconstruct the project from nothing — which is exactly what Step 10's Dockerfile will do on a Linux machine that has never seen this laptop. Running the eval suite afterwards returned **12 passed, 0 failed, 1 expected failure**, unchanged, on a fresh set of package versions. That's the Chapter 7 suite paying for itself on something that wasn't an agent bug.
+
+2. **`Ctrl+C` is "kill", not "copy".** Cancelled a `pip install` halfway through (`ERROR: Operation cancelled by user`). Second time this has happened; it also appears in Chapter 1. Use Ctrl+Shift+C, or select and right-click.
+
+3. **The editor is not the disk.** `api.py` looked like 85 lines in VS Code. `/docs` said **"No operations defined in spec!"** — meaning zero routes were registered. `type api.py` in the terminal showed the file was **two lines long**; the paste had never landed.
+   *Rule:* when code behaves as though it doesn't exist, check the disk with `type <file>`, not the editor tab. Same family as the Step 7 unsaved-`cases.jsonl` bug, and it will not be the last.
+   *Corollary:* "No operations defined in spec" almost always means routes didn't register — truncated file, typo'd decorator, or uvicorn pointing at the wrong object.
+
+4. **One terminal for the server, one for everything else.** The server was killed three separate times by typing into its terminal — once by Ctrl+C to clear a bad paste, once by pasting `Activate.ps1` into it, once by a stray command. A dead server shows up in `/docs` as **"Failed to fetch"** with no status code at all. Ignore the CORS suggestions it offers; those are generic guesses. No status code means nothing is listening.
+   *Rule:* server in terminal 1, never touched. Git and everything else in terminal 2 (the `+` button in the VS Code terminal panel).
+
+5. **Pasted terminal output back into the terminal.** PowerShell tried to execute git's output as code, hit `PS` and the prompt text, and threw `Unexpected token 'PS'`. The `>>` continuation problem from Chapter 1's notes. Nothing ran, nothing was harmed, but several minutes were lost working out what had happened.
+
+6. **`--reload` does not watch `.env`.** Editing `.env` and waiting for a reload does nothing — uvicorn watches `.py` files, and the Groq client is built at import time anyway. Three separate attempts to test the error handler came back 200 because the server was never actually restarted.
+   *Rule:* `.env` changes need a manual Ctrl+C and restart. Also worth knowing: `load_dotenv()` does **not** overwrite an environment variable that already exists, so a stale system-level variable would silently win over the file. Checked with `$env:GROQ_API_KEY` — empty, so not the cause here, but it's the first thing to check next time a `.env` change appears to do nothing.
+
+7. **SQLite writes side files.** `checkpoints.db-shm` and `checkpoints.db-wal` appeared as untracked once a long-running server held the database open continuously — they're the write-ahead log and shared memory, holding recent changes before they fold into the main file. They're runtime data like `checkpoints.db` itself. Gitignored (a single `checkpoints.db*` would cover all three).
+
+8. **The real API key ended up in a chat window** while debugging the `.env` file. It was never committed — `.gitignore` did its job — but it was still exposed. Rotated at console.groq.com: revoke the old key, generate a new one, update `.env`. A leaked key is leaked regardless of how it leaked.
+
+### Known limitations (carried into Step 9 / 10)
+
+- **No auth on any endpoint.** Anyone who can reach the URL can cancel orders. Fine on `127.0.0.1`; not fine the moment this is deployed in Step 10.
+- **`agent_langgraph.py` has no `groq.BadRequestError` handling**, unlike `agent_raw.py`. Chapter 6's malformed-tool-call bug can still crash a request over HTTP where the terminal agent would recover and retry. The error handler turns it into a clean 500 rather than a leak, but the retry is missing.
+- **The eval suite still runs against `agent_raw.py`.** Nothing tests the API at all — not the endpoints, not the session behaviour, not the approval gate. Both approval paths were verified by hand, once. That's not a regression guard.
+- **`/approve` assumes one pending approval per thread.** If a model ever requested two risky tools in one turn, only the first name is reported, and approving resumes all of them.
+- **`checkpoints.db` grows forever.** No cleanup, no expiry, no limit on thread count.
+
+### How to verify
+
+```powershell
+# terminal 1 — server only, nothing else typed in here
+uvicorn api:api --reload
+# wait for "Application startup complete" (20-30s while ChromaDB loads)
+
+# terminal 2 — everything else
+curl http://127.0.0.1:8000/health      # {"status":"ok"}
+```
+
+Then at `http://127.0.0.1:8000/docs`:
+
+```json
+// memory survives a restart: run, Ctrl+C the server, restart, run the second one
+{"message": "Where is my order ORD-7781?", "thread_id": "user-1"}
+{"message": "What was that order number again?", "thread_id": "user-1"}   // -> ORD-7781
+
+// threads are isolated
+{"message": "What did I just ask you?", "thread_id": "user-2"}            // -> no idea
+
+// the approval gate, both directions
+{"message": "Cancel order ORD-7783", "thread_id": "gate-test"}            // agent asks first
+{"message": "yes", "thread_id": "gate-test"}                             // -> needs_approval: true
+// then POST /approve with {"thread_id": "gate-test", "approved": false}
+```
+
+```powershell
+git status                      # after approved:false -> orders.json NOT modified
+                                # after approved:true  -> orders.json modified
+git checkout data/orders.json   # reset the mock DB after testing
+```
+
+### Commits
+
+`step8-add-fastapi-deps`, `step8-chat-endpoint`, `step8-sessions`, `step8-approval-endpoint`, `step8-gitignore-sqlite-wal`, `step8-error-handling`.
+
 ### What's next
 
-Phase 1 is complete: project moved to `C:\projects\ecom-support-agent`, branch renamed `master` → `main`, pushed to GitHub, README rewritten.
-
-Chapter 8: FastAPI. Wrapping the agent in a web endpoint so something other than a terminal can call it — a URL that takes a question and returns JSON. That's the boundary where sessions, concurrent users, and not leaking stack traces start to matter.
+Chapter 9: Gradio. A chat window in the browser that calls these endpoints — generating a `thread_id` per session, rendering the markdown the API currently returns as escaped `\n`, and drawing a real Yes/No button when `needs_approval` comes back true. The response shape was designed for exactly that.
