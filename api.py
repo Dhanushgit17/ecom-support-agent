@@ -32,6 +32,15 @@ def pending_tool_names(config):
     return [tc["name"] for tc in state.values["messages"][-1].tool_calls]
 
 
+def tool_names_used(config):
+    """Every tool called so far on this thread, oldest first."""
+    names = []
+    for m in graph.get_state(config).values["messages"]:
+        for tc in getattr(m, "tool_calls", None) or []:
+            names.append(tc["name"])
+    return names
+
+
 def run_until_done_or_approval(config, first_input):
     """Resume the graph, stopping if a tool needs human approval."""
     result = graph.invoke(first_input, config)
@@ -47,6 +56,7 @@ def run_until_done_or_approval(config, first_input):
                 "thread_id": config["configurable"]["thread_id"],
                 "needs_approval": True,
                 "pending_tool": risky[0],
+                "tool_calls": tool_names_used(config),
             }
         result = graph.invoke(None, config)
 
@@ -55,6 +65,7 @@ def run_until_done_or_approval(config, first_input):
         "thread_id": config["configurable"]["thread_id"],
         "needs_approval": False,
         "pending_tool": None,
+        "tool_calls": tool_names_used(config),
     }
 
 
@@ -95,6 +106,7 @@ def approve(req: ApproveRequest):
                 "thread_id": req.thread_id,
                 "needs_approval": False,
                 "pending_tool": None,
+                "tool_calls": tool_names_used(config),
             }
 
         if not req.approved:
