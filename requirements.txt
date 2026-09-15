@@ -7,3 +7,5 @@ langgraph-checkpoint-sqlite
 chromadb
 fastapi
 uvicorn[standard]
+gradio
+requests
