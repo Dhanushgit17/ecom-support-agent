@@ -4,6 +4,10 @@ A customer-support agent for an online store, built from scratch to learn how pr
 
 Free stack throughout: Groq's free tier for the LLM, on-device embeddings, SQLite for memory.
 
+**▶ Live demo: [ecom-support-agent.onrender.com](https://ecom-support-agent.onrender.com)**
+
+*It's on a free tier that sleeps when idle, so the first load after a quiet spell takes 30–60 seconds. There's no authentication — see [Known limitations](#known-limitations).*
+
 ## What it does
 
 Answers customer questions about orders, products and store policy, and cancels orders — but never without a human saying yes first.
@@ -30,7 +34,7 @@ LangGraph agent  ──  SqliteSaver ──► checkpoints.db   (conversation me
         └── cancel_order       ──► data/orders.json   (writes; needs approval)
 ```
 
-The UI talks to the API over HTTP rather than importing it. That keeps the API honest — if it breaks, the UI notices — and means either half can be replaced without touching the other.
+The UI talks to the API over HTTP rather than importing it. That keeps the API honest — if it breaks, the UI notices — and means either half can be replaced without touching the other. In the container both run side by side, with the API bound to localhost so only the UI port is public.
 
 | File | What it is |
 |---|---|
@@ -40,10 +44,12 @@ The UI talks to the API over HTTP rather than importing it. That keeps the API h
 | `rag.py` | Chunk → embed → retrieve, with distance scores |
 | `api.py` | FastAPI wrapper. Sessions, approval endpoints, error handling |
 | `ui.py` | Gradio chat window |
+| `Dockerfile`, `start.sh` | Builds and runs both processes in one container |
 | `evals/` | 13 behavioural test cases and a runner |
+| `.github/workflows/` | Runs the evals on every push |
 | `docs/GUIDEBOOK.md` | Chapter per step, in plain English, including every bug |
 
-## Running it
+## Running it locally
 
 **Requirements:** Python 3.11+, a free [Groq API key](https://console.groq.com).
 
@@ -88,6 +94,14 @@ The API alone is at `http://127.0.0.1:8000/docs`, which gives you an interactive
 python evals/run_evals.py    # 12 passed, 0 failed, 1 expected failure
 ```
 
+## Deployment
+
+The `Dockerfile` builds everything from scratch — installs requirements, copies the code, and runs `python rag.py` to build the vector index, which isn't in the repo. `start.sh` launches uvicorn in the background, waits for `/health` to answer, then starts Gradio in the foreground.
+
+It's deployed on Render's free tier, but nothing in the image is Render-specific. It needs two environment variables (`GROQ_API_KEY`, `MODEL`) and a port to bind to; `PORT` is read from the environment with a fallback to 7860.
+
+Every push to `main` triggers two things: Render rebuilds the container, and GitHub Actions runs the eval suite against the new commit.
+
 ## The API
 
 | Endpoint | Body | Returns |
@@ -110,14 +124,16 @@ When the agent wants to run a risky tool, `/chat` returns `needs_approval: true`
 
 **Evals check behaviour, not wording.** An LLM says it differently every run, so the tests check which tools were called, how many calls it took, and whether key facts from the data files appear. Checking exact wording fails for cosmetic reasons and teaches you nothing.
 
+**Containers outlive platforms.** This was built for Hugging Face Spaces, which stopped offering free Docker hosting mid-build. Moving the whole thing to a different provider cost two lines.
+
 ## Known limitations
 
-- **No authentication on any endpoint.** Anyone who can reach the URL can cancel orders. Fine on localhost, not fine deployed.
-- **The evals only cover `agent_raw.py`.** Nothing tests the API, the sessions, the approval gate or the UI. Those were verified by hand.
+- **No authentication.** Anyone who opens the live demo can cancel orders. This is deliberate: the approval gate is the most interesting thing here and faking it would defeat the point. The data is mock and the container resets on restart, so nothing can be permanently broken.
+- **The free tier sleeps** after ~15 minutes idle, and the filesystem resets with it — so conversations don't survive a cold start, even though the persistence itself works.
+- **The evals only cover `agent_raw.py`.** Nothing tests the API, the sessions, the approval gate or the UI. Those were verified by hand. CI can be green while the deployed app is broken.
 - **The eval answer-checks are substring matching**, so a confident invention can pass if it contains the right phrase. An LLM judge is planned.
 - **The harness is single-turn**, so multi-turn bugs (like the skipped confirmation above) can't be scored.
 - **`agent_langgraph.py` doesn't retry malformed tool calls** the way `agent_raw.py` does. Over HTTP that becomes a clean 500 rather than a recovery.
-- **`checkpoints.db` grows forever.** No cleanup, expiry or thread limit.
 - One eval case is a deliberate, documented failure: asked about exchanging a wrong-size item, the agent applies the returns policy to a situation the document doesn't cover. It's the target for the fine-tuning phase.
 
 ## Roadmap
@@ -125,12 +141,12 @@ When the agent wants to run a risky tool, `/chat` returns `needs_approval: true`
 **Phase 1 — Build** ✅
 Setup · agent loop · tool design · LangGraph + memory · human-in-the-loop · RAG · evals
 
-**Phase 2 — Deploy**
-FastAPI ✅ · Gradio UI ✅ · Docker + Hugging Face Spaces + CI
+**Phase 2 — Deploy** ✅
+FastAPI · Gradio UI · Docker + public URL + CI
 
 **Phase 3 — Fine-tune**
 Build a dataset for the policy-stretching failure · LoRA on free Colab · measure against the base model with this same eval harness · publish the adapter · swap it into the deployed agent
 
 ## Stack
 
-Groq (`openai/gpt-oss-120b`) · LangGraph · ChromaDB with on-device all-MiniLM embeddings · FastAPI · Gradio · SQLite
+Groq (`openai/gpt-oss-120b`) · LangGraph · ChromaDB with on-device all-MiniLM embeddings · FastAPI · Gradio · SQLite · Docker · Render · GitHub Actions
