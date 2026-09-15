@@ -10,30 +10,61 @@ def new_thread_id():
     return f"ui-{uuid.uuid4().hex[:12]}"
 
 
+def call_api(path, payload):
+    """POST to the agent. Returns (answer, needs_approval, pending_tool)."""
+    try:
+        r = requests.post(f"{API_URL}{path}", json=payload, timeout=120)
+        r.raise_for_status()
+        data = r.json()
+        return data["answer"], data.get("needs_approval", False), data.get("pending_tool")
+    except requests.exceptions.ConnectionError:
+        return f"Could not reach the agent at {API_URL}. Is uvicorn running?", False, None
+    except requests.exceptions.Timeout:
+        return "The agent took too long to respond. Please try again.", False, None
+    except requests.exceptions.HTTPError:
+        detail = ""
+        try:
+            detail = r.json().get("detail", "")
+        except ValueError:
+            pass
+        return f"The agent returned an error. {detail}", False, None
+
+
+def render(history, answer, needs_approval, pending_tool):
+    """Append the answer and set the controls to match the approval state."""
+    if needs_approval:
+        note = f"⚠️ Approval needed to run **{pending_tool}**."
+        history = history + [{"role": "assistant", "content": note}]
+    else:
+        history = history + [{"role": "assistant", "content": answer}]
+
+    return (
+        history,
+        "",
+        gr.update(visible=needs_approval),
+        gr.update(interactive=not needs_approval),
+    )
+
+
 def send(message, history, thread_id):
-    """Post one message to /chat and append the exchange to the visible history."""
     if not message.strip():
-        return history, ""
+        return history, "", gr.update(visible=False), gr.update(interactive=True)
 
     history = history + [{"role": "user", "content": message}]
+    answer, needs_approval, pending_tool = call_api(
+        "/chat", {"message": message, "thread_id": thread_id}
+    )
+    return render(history, answer, needs_approval, pending_tool)
 
-    try:
-        r = requests.post(
-            f"{API_URL}/chat",
-            json={"message": message, "thread_id": thread_id},
-            timeout=120,
-        )
-        r.raise_for_status()
-        answer = r.json()["answer"]
-    except requests.exceptions.ConnectionError:
-        answer = f"Could not reach the agent at {API_URL}. Is uvicorn running?"
-    except requests.exceptions.Timeout:
-        answer = "The agent took too long to respond. Please try again."
-    except requests.exceptions.HTTPError:
-        answer = f"The agent returned an error. {r.json().get('detail', '')}"
 
-    history = history + [{"role": "assistant", "content": answer}]
-    return history, ""
+def decide(approved, history, thread_id):
+    history = history + [
+        {"role": "user", "content": "Approved." if approved else "Rejected."}
+    ]
+    answer, needs_approval, pending_tool = call_api(
+        "/approve", {"thread_id": thread_id, "approved": approved}
+    )
+    return render(history, answer, needs_approval, pending_tool)
 
 
 with gr.Blocks(title="E-commerce Support Agent") as demo:
@@ -42,13 +73,30 @@ with gr.Blocks(title="E-commerce Support Agent") as demo:
     thread_id = gr.State(value=new_thread_id)
 
     chatbot = gr.Chatbot(height=450, label="Conversation")
+
+    with gr.Row(visible=False) as approval_row:
+        approve_btn = gr.Button("Approve", variant="primary")
+        reject_btn = gr.Button("Reject", variant="stop")
+
     box = gr.Textbox(
         placeholder="Ask about an order, a product, or a policy...",
         show_label=False,
         submit_btn=True,
     )
 
-    box.submit(fn=send, inputs=[box, chatbot, thread_id], outputs=[chatbot, box])
+    thread_label = gr.Markdown()
+    demo.load(fn=lambda t: f"`thread_id: {t}`", inputs=thread_id, outputs=thread_label)
+
+    outputs = [chatbot, box, approval_row, box]
+
+    box.submit(fn=send, inputs=[box, chatbot, thread_id], outputs=outputs)
+
+    approve_btn.click(
+        fn=lambda h, t: decide(True, h, t), inputs=[chatbot, thread_id], outputs=outputs
+    )
+    reject_btn.click(
+        fn=lambda h, t: decide(False, h, t), inputs=[chatbot, thread_id], outputs=outputs
+    )
 
 
 if __name__ == "__main__":
