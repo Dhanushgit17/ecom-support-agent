@@ -556,6 +556,175 @@ git checkout data/orders.json   # reset the mock DB after testing
 
 `step8-add-fastapi-deps`, `step8-chat-endpoint`, `step8-sessions`, `step8-approval-endpoint`, `step8-gitignore-sqlite-wal`, `step8-error-handling`.
 
+## Chapter 9 — Gradio: a face for the API
+
+**Goal:** a chat window in a browser that talks to the endpoints from Chapter 8. Type a question, read a formatted answer, click a button to approve a cancellation.
+
+**Time taken:** one session, and it went smoothly — which is itself worth noting. Chapter 8 did the hard thinking; this chapter mostly spends it.
+
+### The one architectural decision
+
+Gradio could reach the agent two ways:
+
+**A. Import it.** `from api import chat` and call it as a Python function. One process, least code.
+**B. Make HTTP requests** to `http://127.0.0.1:8000/chat`, exactly as Swagger's `/docs` page does.
+
+**B**, and the reason matters more than the code. If the UI imports the agent, the API becomes decorative — it could break and nothing would notice. If the UI speaks HTTP, it is a real client: it proves the API works on every single message, it could run on a different machine, and the UI can be replaced without touching the agent.
+
+The price is two processes. `uvicorn` on port 8000, `python ui.py` on port 7860, and the UI has to behave sensibly when the other one isn't running.
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `ui.py` | Gradio app. Chat box, per-session thread id, Approve/Reject buttons, a collapsed Debug panel. Talks to the API over HTTP only. |
+| `api.py` | Added `tool_names_used()`; `tool_calls` is back in every response. |
+| `requirements.txt` | Added `gradio` and `requests`. |
+
+Three terminals from here on: **1** uvicorn (never typed into), **2** git and everything else, **3** Gradio (never typed into).
+
+### Concepts, in plain English
+
+**`gr.Blocks`** is a layout container. Everything inside the `with` block becomes part of the page, top to bottom. There's a simpler `gr.Interface` for one-function demos, but `Blocks` is what allows buttons that appear and disappear, so the chapter starts there rather than migrating later.
+
+**The event model is three things:** `fn` (the Python function to run), `inputs` (components whose values get passed in, in order), `outputs` (components that receive what the function returns, in order). `box.submit(fn=send, inputs=[...], outputs=[...])` is the whole wiring.
+
+**`gr.State`** is a variable Gradio keeps **per browser session**. This is what makes threads work:
+
+```python
+thread_id = gr.State(value=new_thread_id)
+```
+
+Passing the *function* — no parentheses — is the important detail. Gradio calls it once per connected browser, so every tab gets its own id. Write `value=new_thread_id()` and every visitor on earth shares a single conversation. It would look fine in testing with one tab open and be a nasty bug to find later.
+
+**The chatbot is a view, not the truth.** `gr.Chatbot` holds the visible transcript, but the real conversation lives in `checkpoints.db` on the server, keyed by thread. Refresh the page and the chat window empties while the agent still remembers everything — because memory travels with the `thread_id`, not with the UI.
+
+**`gr.update(...)`** changes a component's *properties* from inside a handler, rather than its value. `gr.Row(visible=False)` starts hidden; returning `gr.update(visible=True)` reveals it. Same mechanism disables the textbox.
+
+### The approval buttons — where Chapter 8's design pays off
+
+The `/chat` response shape was designed in Chapter 8 specifically for this moment:
+
+```json
+{"answer": "...", "thread_id": "...", "needs_approval": true, "pending_tool": "cancel_order"}
+```
+
+The UI checks **one boolean**. It never reads the English text and guesses. When `needs_approval` is true:
+
+- a warning line goes into the chat naming the tool
+- the Approve / Reject row becomes visible
+- **the textbox is disabled**
+
+That third one isn't cosmetic. Before the buttons existed, the agent said *"I need your approval before I run: cancel_order"* and the natural next move was to type a guess — `cancel_order` was the guess actually tried — which went to `/chat` as an ordinary message and did nothing, because the approval doesn't live in the conversation at all. It lives in `checkpoints.db` as a frozen graph state that only `/approve` can unfreeze.
+
+Disabling the box is the same principle as `interrupt_before` one layer up: don't rely on the user choosing correctly, remove the wrong path.
+
+Clicking a button calls `/approve` instead of `/chat`, and writes "Approved." or "Rejected." into the visible transcript so the page records what happened. The server already knows; that line is for the human reading it.
+
+**Verified both directions, against the file on disk:**
+
+| Action | Agent said | `git status` |
+|---|---|---|
+| Reject | *"Understood—I won't proceed with the cancellation."* | `data/orders.json` untouched |
+| Approve | *"Your order ORD-7783 has been cancelled successfully."* | `data/orders.json` modified |
+
+### Errors the agent isn't responsible for
+
+`call_api()` has three separate `except` branches, because three different failures need three different sentences:
+
+| Exception | Cause | Message |
+|---|---|---|
+| `ConnectionError` | uvicorn isn't running | "Could not reach the agent... Is uvicorn running?" |
+| `Timeout` | agent took over 120s | "The agent took too long to respond." |
+| `HTTPError` | a 4xx or 5xx came back | "The agent returned an error." + the `detail` field |
+
+`r.raise_for_status()` is what turns a 500 response into an exception, which means Chapter 8's error reference finally reaches a human who could read it out: *"Something went wrong. Reference: bfae1768."*
+
+`timeout=120` matters — `requests` waits **forever** by default, and an agent making several tool calls genuinely takes 10–20 seconds. Generous but bounded.
+
+### Two things that came free
+
+**Markdown renders.** The API returns `"**ORD-7781** has been shipped\n\n- **Carrier:** Delhivery"`. In `/docs` that's literal asterisks and escaped newlines; in `gr.Chatbot` it's bold text and bullet points, because `render_markdown` defaults to `True`.
+
+**Thread isolation became visible.** Chapter 8 proved it with a JSON field. Here it's two browser tabs: ask ORD-7781 in one, ask "what did I just ask?" in the other, get a blank stare. Same mechanism, but now it's something you can show someone.
+
+### The Debug panel
+
+A `gr.Accordion("Debug", open=False)` at the bottom holds the `thread_id` and the list of tools called. Closed by default, so a customer never sees it, and nothing has to be stripped out before Step 10.
+
+Getting the tool list back required a change to `api.py`. Chapter 8's first version of `/chat` returned `tool_calls`; the field was dropped when the endpoint moved to LangGraph in 8.3 and nobody noticed until the UI wanted it. A small, healthy pattern: **building the client reveals what the API should have exposed.**
+
+```python
+def tool_names_used(config):
+    names = []
+    for m in graph.get_state(config).values["messages"]:
+        for tc in getattr(m, "tool_calls", None) or []:
+            names.append(tc["name"])
+    return names
+```
+
+Note this returns every tool called on the **whole thread**, not just the last turn — the graph state holds the full conversation. For a debug panel that's arguably more useful, but it will confuse the counts if you forget.
+
+Why bother: Chapter 3's fix took the earbuds question from 8 tool calls down to 1, and Chapter 7 locked that in with `max_tool_calls: 1`. The Debug panel shows the same signal live. If `search_products` ever appears six times for one question, the tool has started starving the model again — visible immediately, without opening a log file.
+
+### Mistakes made, and the lesson from each
+
+1. **Wrote code against a library version that doesn't exist yet.** `gr.Chatbot(type="messages", ...)` threw `TypeError: got an unexpected keyword argument 'type'`. The installed Gradio was **6.27.0**, where the messages format is the only format and the parameter has been removed entirely.
+
+   The fix was not to guess again. Ask the library what it accepts:
+
+   ```powershell
+   python -c "import gradio as gr, inspect; print(inspect.signature(gr.Chatbot.__init__))"
+   ```
+
+   That printed every parameter, confirmed `type` was gone, and also confirmed `render_markdown=True` was already the default. A second check on `gr.Textbox` confirmed `submit_btn` still existed, catching the *next* mismatch before it crashed.
+
+   *Rule:* `inspect.signature(SomeClass.__init__)` is to a Python library what `client.models.list()` is to Groq — the way to ask instead of assume. This is Chapter 1's retired-model-name lesson in a different costume, and it will keep coming back. Fast-moving libraries move fast.
+
+2. **Typed a guess at the approval prompt.** With no buttons yet, the agent said *"I need your approval before I run: cancel_order"*, so `cancel_order` got typed into the box. It went to `/chat` as an ordinary message and achieved nothing. Not really a mistake — it's the correct instinct, and it's precisely why the buttons exist and why the textbox now locks. A UI that requires the user to guess a magic word is a broken UI.
+
+3. **Reused one browser session for both approval tests.** Thread `ui-294e1728c73e` cancelled ORD-7783 and then declined a cancellation, so the transcript reads oddly. Harmless in testing; worth using a fresh tab per scenario when the transcript is evidence.
+
+### Known limitations (carried into Step 10)
+
+- **Still no auth anywhere.** Now more pressing: `demo.launch(share=True)` would hand anyone a public URL that can cancel orders.
+- **Gradio publishes its own API on 7860** (the "Use via API" link at the bottom of the page). So there are now two APIs, not one. Worth knowing before anything goes on the public internet.
+- **The chat window empties on refresh** while the server still remembers the thread. Reloading the visible history from the server on page load is possible and not done.
+- **`checkpoints.db` now grows one thread per browser session**, and nothing ever cleans it up.
+- **Nothing tests the UI**, and the evals still run only against `agent_raw.py`.
+
+### How to verify
+
+```powershell
+# terminal 1 - the API
+uvicorn api:api --reload      # wait for "Application startup complete"
+
+# terminal 3 - the UI
+python ui.py                  # serves http://127.0.0.1:7860
+```
+
+At `http://127.0.0.1:7860`:
+
+1. *"Where is my order ORD-7781?"* → formatted answer, real bold and bullets
+2. *"What did I just ask?"* → it remembers
+3. Open a **second tab**, ask the same → no idea who you are
+4. *"Cancel order ORD-7783"* → *"yes"* → warning line, buttons appear, textbox greys out
+5. Click **Reject** → declines, buttons vanish, textbox unlocks
+6. **Debug** accordion → `thread_id` and the list of tools called
+
+```powershell
+# terminal 2
+git status                      # after Reject -> orders.json NOT modified
+                                # after Approve -> orders.json modified
+git checkout data/orders.json   # reset the mock DB after testing
+```
+
+Also worth doing once: stop uvicorn, send a message, and confirm the UI says *"Could not reach the agent"* instead of showing a traceback.
+
+### Commits
+
+`step9-gradio-health-check`, `step9-chat-ui`, `step9-approval-buttons`, `step9-tool-calls-debug-panel`.
+
 ### What's next
 
-Chapter 9: Gradio. A chat window in the browser that calls these endpoints — generating a `thread_id` per session, rendering the markdown the API currently returns as escaped `\n`, and drawing a real Yes/No button when `needs_approval` comes back true. The response shape was designed for exactly that.
+Chapter 10: Docker, Hugging Face Spaces, and GitHub Actions. Two processes have to become one container; the `chroma_db/` index is gitignored, so the build has to run `python rag.py` itself; `GROQ_API_KEY` becomes a Spaces secret rather than a `.env` file; and the eval suite finally runs on every push instead of when somebody remembers. The "no auth" item stops being a note and becomes a decision.
