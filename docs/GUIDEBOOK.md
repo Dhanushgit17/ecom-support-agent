@@ -725,6 +725,215 @@ Also worth doing once: stop uvicorn, send a message, and confirm the UI says *"C
 
 `step9-gradio-health-check`, `step9-chat-ui`, `step9-approval-buttons`, `step9-tool-calls-debug-panel`.
 
+## Chapter 10 — Docker, a public URL, and evals that run themselves
+
+**Goal:** stop the agent being something that only exists while a laptop is on. Put it on the internet at a URL anyone can open, and make the eval suite run on every push instead of when somebody remembers.
+
+**Time taken:** one long session, including a mid-step change of hosting provider that turned out to be the most useful thing in the chapter.
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `Dockerfile` | The recipe: clean Linux box → Python → requirements → code → build the RAG index → run |
+| `start.sh` | Starts uvicorn in the background, waits for it, then starts Gradio |
+| `.dockerignore` | Keeps `.venv/`, `chroma_db/` and friends out of the image |
+| `.github/workflows/evals.yml` | Runs the 13 eval cases on every push to `main` |
+
+Live at `https://ecom-support-agent.onrender.com`. `api.py`, `ui.py`, `tools.py`, `rag.py` — all unchanged except one line in `ui.py`.
+
+### The thing that happened halfway through
+
+The plan, written in Chapter 9, said Hugging Face Spaces. It had been the standard free answer for hosting a demo like this for years, and it's in every tutorial.
+
+It isn't any more. Hugging Face now requires a paid plan (PRO for personal accounts) for any Space that runs compute — both the Docker and Gradio SDKs. Only Static Spaces remain free. The change landed around July 2026 and there was a formal community complaint about it.
+
+Checking the alternatives turned up more of the same. Fly.io has no free tier for new signups, just a 2-VM-hour trial. Railway gives a one-time $5 credit. Koyeb's status is genuinely unclear — sources disagree about whether the free compute tier still exists. Render still has a real free tier for Docker web services with no credit card, and that's where it went.
+
+**Here's the part worth keeping.** Changing hosting provider mid-step cost **two lines**:
+
+- deleted the `useradd` / `USER` block (an HF-specific uid-1000 requirement)
+- changed `demo.launch()` to read a `PORT` environment variable
+
+That's it. The Dockerfile, `start.sh`, `.dockerignore`, and the entire application moved to a completely different company's infrastructure without touching anything else.
+
+This is the actual argument for containers, and it arrived by accident rather than as a lecture. The recipe describes a machine, not a vendor. Whoever runs it is a detail.
+
+*Lesson beyond Docker:* deployment platforms' free tiers evaporate. Heroku killed its free tier in 2022, Fly.io in 2024, Hugging Face in 2026. Anything that pins a project to one provider's specific magic is a liability. Anything portable survives.
+
+### Concepts, in plain English
+
+**A container is a written recipe for a computer.** Start from a clean Linux box with Python on it, install these packages, copy this code in, run this command. Anyone who follows the recipe gets an identical machine.
+
+The venv breaking in Chapter 8 was this problem in miniature: a project that secretly depended on one folder on one laptop. `requirements.txt` fixed it for packages; the Dockerfile fixes it for everything else.
+
+**Layers and caching.** Each line in a Dockerfile makes a layer, and Docker caches them. Hence:
+
+```dockerfile
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+```
+
+Requirements change rarely, code changes constantly. In this order, editing `ui.py` doesn't reinstall 110 packages. Reverse the two `COPY` lines and every build is a full reinstall.
+
+**The index has to be built, not copied.** `chroma_db/` is gitignored, so it's not in the repo the platform clones. `RUN python rag.py` builds it during the image build, so it's baked in and startup is fast. The `.gitignore` habit that's protected the project all along finally needed a deliberate workaround.
+
+**`.dockerignore` is not `.gitignore`.** Docker doesn't read `.gitignore`, so `COPY . .` would happily copy `.venv/` — hundreds of megabytes — into the image. On a 512MB free tier that matters. `.env` is in there too as a belt-and-braces measure.
+
+### Two processes, one container
+
+HF Spaces and Render both expose a single port. The app needs two: uvicorn on 8000, Gradio on 7860.
+
+Two ways to solve it:
+
+**A. Two processes, one entrypoint.** A shell script starts uvicorn in the background and Gradio in the foreground. Port 8000 stays private inside the container; the outside world only sees the UI port.
+
+**B. Mount Gradio inside FastAPI.** One process, `gradio.mount_gradio_app()`, uvicorn serves both.
+
+**A was chosen**, and the reason is Chapter 9's reason. The UI talks to the API over HTTP precisely so the API stays honest. B would turn every message into the server calling itself — works, but it throws away the separation and can deadlock under load. A costs a three-line script and changes no application code at all.
+
+The script has one non-obvious piece:
+
+```bash
+uvicorn api:api --host 127.0.0.1 --port 8000 &
+
+python -c "
+import time, requests
+for i in range(60):
+    try:
+        requests.get('http://127.0.0.1:8000/health', timeout=2)
+        print('API is up', flush=True)
+        break
+    except Exception:
+        time.sleep(1)
+else:
+    raise SystemExit('API never started')
+"
+
+python ui.py
+```
+
+The `&` backgrounds uvicorn. The loop then **waits for it to actually be ready** — ChromaDB takes 20–30 seconds to load, and without the wait Gradio would start instantly and the first visitor would get "Could not reach the agent." That error path, written in Chapter 9 for a laptop where uvicorn might not be running, turns out to describe a real production race condition.
+
+This is also the first real use of `/health`. It exists precisely to answer "are you alive?" without involving the agent, the API key, or ChromaDB.
+
+**Two opposite bind addresses, both correct:**
+
+| Process | Binds to | Why |
+|---|---|---|
+| uvicorn | `127.0.0.1` | Private. Only reachable from inside the container. |
+| Gradio | `0.0.0.0` | Public. Accepts connections from outside. |
+
+`0.0.0.0` means "any network interface." Gradio's default of `127.0.0.1` inside a container means the container talking to itself, which produces a Space that builds perfectly and then shows nothing.
+
+### Render specifics
+
+- **`PORT` environment variable.** Render tells the app which port to bind. `int(os.environ.get("PORT", 7860))` uses it in production and falls back to 7860 locally, so nothing changes on the laptop.
+- **`GROQ_API_KEY` and `MODEL`** go in the dashboard as environment variables. `load_dotenv()` finds no `.env` and falls through to the real environment, which is exactly right. `MODEL` matters: without it the code falls back to `llama-3.3-70b-versatile`, which Groq retired — and that failure only appears when a user sends a message.
+- **The free tier sleeps** after ~15 minutes idle. First visit after a quiet spell waits 30–60 seconds for a cold start.
+- **The filesystem resets** on every restart. `checkpoints.db` and any `cancel_order` writes vanish. For a public demo that's a feature: nobody can permanently break the mock data.
+
+### Auth: the decision that was made deliberately
+
+The URL is public and `cancel_order` writes to disk. Three options were on the table: a Gradio login, a demo mode where `cancel_order` reports success without writing, or leaving it open.
+
+**Left open, on purpose.** The whole point of the project is the approval gate working, and a fake `cancel_order` would make the most interesting feature a lie. The data is mock, the container resets, and a visitor cancelling ORD-7783 costs nothing. It's documented loudly in the README rather than hidden.
+
+### Evals on every push
+
+`.github/workflows/evals.yml` runs on every push to `main`, on pull requests, and on a manual button (`workflow_dispatch`). Seven steps: checkout, Python, install, validate `cases.jsonl`, build the index, run the evals, check the mock data was restored.
+
+Chapter 7 built a suite so the agent couldn't regress silently, then left the running of it to human memory. This closes that gap. It also tests `requirements.txt` on a clean Linux machine continuously — the thing the venv rebuild proved once, by accident.
+
+Two steps are worth pointing at.
+
+**The JSONL check runs before the expensive steps.** It's the same one-liner from Chapter 7, promoted into CI, so a missing `}` fails in 30 seconds instead of after four minutes of installs.
+
+**The last step verifies a claim:**
+
+```yaml
+- name: Check the mock data was restored
+  run: git diff --exit-code data/orders.json
+```
+
+Chapter 7 said the runner snapshots and restores `orders.json` in a `finally`. That was trusted. Now it's checked, automatically, on every push, forever. A suite that quietly mutates its own fixtures is worse than no suite — and this is how you know it doesn't.
+
+**Secrets.** `${{ secrets.GROQ_API_KEY }}` in the YAML is a placeholder; GitHub substitutes the real value at run time and masks it in logs. The workflow file is public and gives nothing away. The key now lives in three places, none of them in a readable file:
+
+| Where | How |
+|---|---|
+| Laptop | `.env`, gitignored |
+| Render | Dashboard environment variable |
+| GitHub Actions | Repository secret, injected at run time |
+
+Same pattern everywhere: code names the variable, the platform supplies the value.
+
+### What the first green run showed
+
+```
+12 passed, 0 failed, 1 expected failures, 0 unexpected passes
+```
+
+Timings: install 43s, build the index 6s, run the evals 51s.
+
+Two things in the log worth noting.
+
+**Every single case used exactly 1 tool call.** Chapter 3's earbuds question — once 8 calls and a step-limit failure — and everything else. `max_tool_calls: 1` holding across the whole suite, on someone else's machine.
+
+**The XFAIL failed differently.** Three earlier runs all stretched the returns policy to cover exchanges. This one didn't:
+
+> *"Sure, I can help with that! Could you please share your order ID so I can check its status and see if it's eligible for..."*
+
+It treated an exchange question as an order question instead. Still XFAIL, because the check looks for a hand-off phrase and there isn't one — but the **failure mode itself varies between runs**. That matters for Phase 3: the training data has to cover both behaviours, and the "before" number needs several runs to mean anything. A baseline measured once isn't a baseline.
+
+### Mistakes made, and the lesson from each
+
+1. **Planned against a free tier that no longer exists.** The Chapter 9 plan named HF Spaces. That was correct information when every tutorial about it was written, and wrong by the time it was needed. *Lesson:* for anything involving a third party's pricing, check the current page before building a plan on it. Free tiers are the least stable thing in software.
+
+2. **`WORKDIR /app` after `USER user`.** The first HF Dockerfile switched to a non-root user and then tried to create a directory at the filesystem root, which that user can't do. Caught by reading it rather than by a failed build — worth the two minutes, because each remote build costs five. *Lesson:* with no local Docker, reading carefully replaces iterating quickly.
+
+3. **`COPY . .` with no `.dockerignore`.** Docker doesn't read `.gitignore`. Would have copied `.venv/` into a 512MB container.
+
+4. **Added the GitHub secret… except it never saved.** The first CI run failed in 51 seconds with `groq.APIConnectionError: Connection error.` The instinct was to suspect a wrong key, or a regional network problem. The Settings page said plainly: *"This repository has no secrets."*
+   *Lesson:* an empty secret doesn't produce a clean 401 — the client builds a malformed request and dies at the connection layer instead. When credentials fail, **check the credential exists before theorising about why it's rejected.** Also: GitHub secret names are case-sensitive and a name that doesn't exist substitutes silently as an empty string, with no warning anywhere.
+
+5. **Enabled debug logging when it couldn't help.** GitHub's debug output describes GitHub's own machinery — action resolution, caches, permissions. The failure was a traceback from `run_evals.py`, already complete in the normal log. Harmless, just noise.
+
+### Known limitations
+
+- **No auth.** Deliberate, documented, but real: anyone with the URL can cancel orders.
+- **The free tier sleeps**, so a cold visitor waits 30–60 seconds.
+- **512MB RAM.** It fits today. ChromaDB plus onnxruntime plus Gradio plus FastAPI is not a lot of headroom, and one more dependency might not fit.
+- **State is ephemeral.** `checkpoints.db` dies with every restart, so a conversation can't outlive a sleep cycle. The persistence built in Chapter 4 works — it just has nowhere durable to live on a free tier.
+- **CI tests `agent_raw.py` only.** Nothing tests `api.py`, `ui.py`, the sessions, or the approval gate. The deployed thing is not the tested thing.
+- **Nothing checks the deployment actually works.** A push could turn the Space into a blank page and the evals would still go green.
+
+### How to verify
+
+```powershell
+# locally, unchanged
+uvicorn api:api --reload     # terminal 1
+python ui.py                 # terminal 3
+```
+
+Deployed:
+
+1. Open `https://ecom-support-agent.onrender.com` (allow 30–60s if it's been idle)
+2. *"Where is my order ORD-7781?"* → confirms Groq is reachable and `MODEL` is set
+3. *"What's your returns policy?"* → confirms `RUN python rag.py` built the index during the image build
+4. *"What did I just ask?"* → confirms `checkpoints.db` is writable in the container
+5. *"Cancel order ORD-7783"* → *"yes"* → buttons → Approve → confirms the full gate over the public internet
+6. Debug accordion → should list all four tools across the session
+
+CI: push anything, then the **Actions** tab. Green tick, and `12 passed, 0 failed, 1 expected failures`.
+
+### Commits
+
+`step10-dockerfile-and-start-script`, `step10-render-dockerfile`, `step10-github-actions-evals`.
+
 ### What's next
 
-Chapter 10: Docker, Hugging Face Spaces, and GitHub Actions. Two processes have to become one container; the `chroma_db/` index is gitignored, so the build has to run `python rag.py` itself; `GROQ_API_KEY` becomes a Spaces secret rather than a `.env` file; and the eval suite finally runs on every push instead of when somebody remembers. The "no auth" item stops being a note and becomes a decision.
+**Phase 2 is complete.** Chapter 1 was a script printing to a terminal; this is a URL with a human-approval gate and a test suite that runs itself.
+
+Phase 3 is fine-tuning, and Step 11 is the dataset: 300–500 examples teaching the model to say "the policy doesn't cover this" instead of reaching for the nearest adjacent process. The XFAIL's varying behaviour in CI means the first job is measuring the baseline properly — several runs, not one — before writing a single training example.
