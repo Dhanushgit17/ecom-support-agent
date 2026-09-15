@@ -1,3 +1,13 @@
+---
+title: E-commerce Support Agent
+emoji: 🛒
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # E-commerce Support Agent
 
 A customer-support agent for an online store, built from scratch to learn how production AI agents actually work. Every part is written out rather than pulled from a template, and every bug hit along the way is documented in [`docs/GUIDEBOOK.md`](docs/GUIDEBOOK.md).
