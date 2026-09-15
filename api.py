@@ -1,8 +1,13 @@
-from fastapi import FastAPI
+import logging
+import uuid
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from agent_langgraph import app as graph
 from langchain_core.messages import HumanMessage
+
+logger = logging.getLogger("api")
 
 api = FastAPI(title="E-commerce Support Agent")
 
@@ -53,6 +58,16 @@ def run_until_done_or_approval(config, first_input):
     }
 
 
+def server_error(where: str, thread_id: str):
+    """Log the full traceback, return a generic message with a lookup id."""
+    error_id = uuid.uuid4().hex[:8]
+    logger.exception("%s failed [%s] thread=%s", where, error_id, thread_id)
+    return HTTPException(
+        status_code=500,
+        detail=f"Something went wrong. Reference: {error_id}",
+    )
+
+
 @api.get("/health")
 def health():
     return {"status": "ok"}
@@ -61,30 +76,34 @@ def health():
 @api.post("/chat")
 def chat(req: ChatRequest):
     config = {"configurable": {"thread_id": req.thread_id}}
-    return run_until_done_or_approval(
-        config, {"messages": [HumanMessage(content=req.message)]}
-    )
+    try:
+        return run_until_done_or_approval(
+            config, {"messages": [HumanMessage(content=req.message)]}
+        )
+    except Exception:
+        raise server_error("chat", req.thread_id)
 
 
 @api.post("/approve")
 def approve(req: ApproveRequest):
     config = {"configurable": {"thread_id": req.thread_id}}
+    try:
+        pending = pending_tool_names(config)
+        if not pending:
+            return {
+                "answer": "There is nothing waiting for approval on this thread.",
+                "thread_id": req.thread_id,
+                "needs_approval": False,
+                "pending_tool": None,
+            }
 
-    pending = pending_tool_names(config)
-    if not pending:
-        return {
-            "answer": "There is nothing waiting for approval on this thread.",
-            "thread_id": req.thread_id,
-            "needs_approval": False,
-            "pending_tool": None,
-        }
+        if not req.approved:
+            graph.update_state(
+                config,
+                {"messages": [HumanMessage(content="I do not approve that action. Do not run it.")]},
+                as_node="tools",
+            )
 
-    if not req.approved:
-        graph.update_state(
-            config,
-            {"messages": [HumanMessage(content="I do not approve that action. Do not run it.")]},
-            as_node="tools",
-        )
         return run_until_done_or_approval(config, None)
-
-    return run_until_done_or_approval(config, None)
+    except Exception:
+        raise server_error("approve", req.thread_id)
