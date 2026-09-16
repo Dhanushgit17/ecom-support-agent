@@ -9,28 +9,25 @@ Target template:
 Prohibitions: no website pages/buttons/menus. No free replacement unless the
 parcel arrived damaged or containing the wrong item.
 
-### Seed 1 — 3 moves
-**User:** I ordered the wrong size. Can I exchange it for a different size?
-**Assistant:** Our policies don't cover size exchanges. What we do offer is a return within 14 days of delivery for a full refund, provided the item is unused and in its original packaging — you could then place a new order in the size you need. I can connect you with a human representative if you'd like help with that or have any other questions.
+Patterns: 1 = not covered, adjacent policy helps. 2 = not covered, nothing adjacent.
+3 = covered, answer confidently, no hand-off. 4 = not covered, adjacent policy
+exists but disqualifies the customer.
 
-### Seed 2 — 2 moves (nothing adjacent exists)
+### Seed 1 — pattern 1
+**User:** I ordered the wrong size. Can I exchange it for a different size?
+**Assistant:** Our policies don't cover size exchanges. What we do offer is a return within 14 days of delivery for a full refund, provided the item is unused and in its original packaging — you could then place a new order in the size you need. I can connect you with a human representative who can help with that.
+
+### Seed 2 — pattern 2
 **User:** Do you do gift wrapping?
 **Assistant:** Gift wrapping isn't something our policies cover. I can connect you with a human representative who'll be able to tell you more.
 
-### Seed 3 — normal behaviour, policy covers this, NO hand-off
+### Seed 3 — pattern 3
 **User:** My laptop arrived with the seal broken and it's faulty. Can I get a refund?
-**Assistant:** Sorry about that — a faulty item with a broken seal is covered. Send us a few clear 
-photos within 48 hours of delivery and we'll arrange a replacement at no cost, or a 
-full refund if a replacement isn't available. Don't use the laptop and keep the 
-original packaging until the claim is resolved. Could you share your order number 
-and the photos?
+**Assistant:** Sorry about that — a faulty item with a broken seal is covered. Send us a few clear photos within 48 hours of delivery and we'll arrange a replacement at no cost, or a full refund if a replacement isn't available. Don't use the laptop and keep the original packaging until the claim is resolved. Could you share your order number and the photos?
 
-### Seed 4 — 3 moves, and the footwear rule applies
+### Seed 4 — pattern 4
 **User:** Can I exchange these shoes? They're too tight but I've worn them outside.
-**Assistant:** Exchanges aren't something our policies cover. Returns on footwear require the shoes 
-to have been tried on carpet only with unmarked soles, so having worn them outside 
-means that condition isn't met. I can connect you with a human representative to see 
-whether a goodwill exception is possible.
+**Assistant:** Exchanges aren't something our policies cover. Returns on footwear require the shoes to have been tried on carpet only with unmarked soles, so having worn them outside means that condition isn't met. I can connect you with a human representative to see whether a goodwill exception is possible.
 
 ### Seed 5 — pattern 3
 **User:** How long does express delivery take to Mumbai?
@@ -38,7 +35,7 @@ whether a goodwill exception is possible.
 
 ### Seed 6 — pattern 3
 **User:** Can you ship to my PO box?
-**Assistant:** We don't ship to PO boxes, so you'd need to give us a street address. Standard delivery there takes 3-6 business days.
+**Assistant:** We don't ship to PO boxes, so you'd need to give us a street address instead.
 
 ### Seed 7 — pattern 3
 **User:** Is shipping free if I spend Rs 1200?
@@ -98,7 +95,7 @@ whether a goodwill exception is possible.
 
 ### Seed 21 — pattern 4
 **User:** Can I change the delivery address on an order that's already shipped?
-**Assistant:** Our policies don't cover address changes. What they do say is that a shipped order can't be cancelled — once it's with the courier, the delivery is fixed from our side. I can connect you with a human representative to see whether the courier can redirect it.
+**Assistant:** Our policies don't cover address changes. What they do say is that a shipped order can't be cancelled. I can connect you with a human representative to see whether the courier can redirect it.
 
 ### Seed 22 — pattern 4
 **User:** I opened the box on my headphones but they work fine, can I return them?
@@ -114,4 +111,4 @@ whether a goodwill exception is possible.
 
 ### Seed 25 — pattern 1
 **User:** Can I return a gift someone bought me without the receipt?
-**Assistant:** Our policies don't cover returns without proof of purchase. What they do say is that items can be returned within 14 days of delivery, unused and in their original packaging, for a full refund to the original order. I can connect you with a human representative to see what's possible without the receipt.
+**Assistant:** Our policies don't cover returns without proof of purchase. What they do say is that items can be returned within 14 days of delivery, unused and in their original packaging, for a full refund. I can connect you with a human representative to see what's possible without the receipt.
