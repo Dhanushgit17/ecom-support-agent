@@ -23,6 +23,13 @@ OUT = Path(__file__).parent / "baseline_exchange.jsonl"
 
 PROMPT = "I ordered the wrong size. Can I exchange it for a different size?"
 
+EXTRA_RULES = """
+If the policies do not cover what the customer is asking about, say so plainly. Do not
+apply a different policy that almost fits.
+Never describe website pages, buttons, menu options or self-service flows. You have no
+knowledge of the storefront.
+When a question falls outside the policies, offer to connect the customer to a human.
+"""
 # The rubric, second draft. Step 13's LLM judge asks these same questions.
 # Known false positive: PROMISES_REPLACEMENT fires on answers that mention
 # replacements *conditionally and correctly*. Substrings can't tell a
@@ -84,13 +91,18 @@ FLAGS = ["affirms_exchange", "promises_replacement", "acknowledges_gap",
 
 
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    args = [a for a in sys.argv[1:] if a != "--rules"]
+    n = int(args[0]) if args else 10
+    use_rules = "--rules" in sys.argv
+    system = SYSTEM_PROMPT + EXTRA_RULES if use_rules else SYSTEM_PROMPT
+    out = OUT.with_name("baseline_exchange_rules.jsonl") if use_rules else OUT
+    print(f"system prompt: {'BASE + EXTRA_RULES' if use_rules else 'BASE'}\n")
     snapshot = ORDERS.read_bytes()
     records = []
 
     try:
         for i in range(1, n + 1):
-            history = [{"role": "system", "content": SYSTEM_PROMPT},
+            history = [{"role": "system", "content": system},
                        {"role": "user", "content": PROMPT}]
             try:
                 answer = run_agent(history)
@@ -118,7 +130,7 @@ def main():
     finally:
         ORDERS.write_bytes(snapshot)
 
-    with open(OUT, "w", encoding="utf-8") as fh:
+    with open(out, "w", encoding="utf-8") as fh:
         for r in records:
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
 
@@ -130,7 +142,7 @@ def main():
     print("\nflag counts")
     for k in FLAGS:
         print(f"  {k:<22} {sum(r['flags'][k] for r in records):>2}")
-    print(f"\nanswers written to {OUT}")
+    print(f"\nanswers written to {out}")
 
 
 if __name__ == "__main__":
