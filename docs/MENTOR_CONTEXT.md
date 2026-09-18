@@ -44,6 +44,8 @@ E-commerce customer-support agent. Local repo: `C:\projects\ecom-support-agent`.
 - Verify destructive actions against the file on disk (`git status`), never against what the agent says it did.
 - Test that a gate *opens* as well as that it closes.
 - **When a prompt asks the model to classify or generate by category, give it a test it can run, worked examples, and near-misses that are explicitly not that category.** A one-line description of a category produces confident mislabelling.
+- **A validator proves nothing forbidden appears. It cannot tell you an answer is good.** Every generated answer still needs a human read.
+- **An instruction that fixes one failure tends to introduce its mirror image.** Telling the model to carry every condition across stopped it dropping conditions and started it reciting irrelevant ones. Read the next batch for overshoot, not just for the original bug.
 - **Ask, don't guess.** `inspect.signature(SomeClass.__init__)` for libraries, `client.models.list()` for Groq, and web-search anything about a third party's pricing or free tier before planning around it.
 - **Check a credential exists before theorising about why it's rejected.** An empty secret fails at the connection layer, not with a clean 401.
 - When several coordinated edits are needed across files, mentor writes out the complete files rather than patch instructions.
@@ -85,7 +87,7 @@ Target answer: acknowledge it isn't covered, state what the policy does allow, h
 
 ## Step 11 in progress — the fine-tuning dataset
 
-**Commits:** `step11-baseline-measurement`, `step11-prompt-ceiling-experiment`, `step11-first-four-seeds`, `step11-25-seeds`, `step11-seeds-cleanup`, `step11-validator`, `step11-question-generator`, `step11-briefs-with-examples`.
+**Commits:** `step11-baseline-measurement`, `step11-prompt-ceiling-experiment`, `step11-first-four-seeds`, `step11-25-seeds`, `step11-seeds-cleanup`, `step11-validator`, `step11-question-generator`, `step11-briefs-with-examples`, `step11-context-update`, `step11-pass2-answer-generator`.
 
 ### Baseline — measured, not guessed
 `evals/baseline.py` runs one prompt N times and buckets each answer (stretch / redirect / near_target / target / other / error), writing every answer to `evals/baseline_exchange.jsonl`. `--rules` appends `EXTRA_RULES` to the system prompt and writes to `baseline_exchange_rules.jsonl`.
@@ -115,8 +117,21 @@ Two bucketing false negatives, kept as evidence for Step 13's LLM judge — subs
 ### Files
 - `data/seeds.md` — 25 hand-written examples, **3/7/11/4** across patterns 1/2/3/4. Answer template: name the gap plainly → state what the policy *does* allow → never imply the workaround resolves the request → offer a human.
 - `data/validate.py` — 5 rules, written *before* any generation so no rule could be softened to rescue work already done: every number must come from `policies.md` or the customer's message; no invented storefront UI; replacements only when the customer reports damage or a wrong item; hand-off present for 1/2/4 and absent for 3; pattern 2 capped at two sentences. Self-test = all 25 seeds must pass. Green.
+  Gained during pass 2: `normalize()` (model output uses curly apostrophes, so `I'll arrange` arrives as `I’ll arrange` and never matched a straight-quoted phrase); `cracked`/`chipped`/`shattered`/`missing` and similar added to `OUR_ERROR_WORDS`; a new rule against **promising an action the agent has no tool for** (`let me arrange`, `I'll process` - first person is the tell, since "we'll arrange a replacement" states what the policy provides and is fine); and a file mode, `python data/validate.py data/training_pairs.jsonl`, which re-checks generated rows with no API calls.
+- `data/generate_answers.py` — pass 2, **answers**. For each question: policy document + a per-pattern template + 3 hand-written seed answers of that pattern as worked examples. `TEMPERATURE = 0.7` (lower than pass 1 - an answer that invents a number is useless). **Retry once, then park**: a failed answer is retried with its own rejection reasons attached, and if it fails again it goes to `rejected_answers.jsonl` for a human to read. Nothing is silently discarded. Resumable - `load_done()` skips anything already answered or parked, so `python data/generate_answers.py 16` tops up.
 - `data/generate_questions.py` — pass 1, **questions only**. Questions and answers are generated separately so the model can't pattern-match whole examples. Appends, tops up to `TARGETS`, and shows the model everything already written (seeds included, via `parse_seeds()` imported from `validate.py`).
 - `data/generated_questions.jsonl` — **48 questions, 8/16/8/16. Untracked, deliberately**: generated questions need a human pass before they earn a place in the repo.
+
+### Pass 2 — answers. 24 of 48 done
+8 pattern 3, 8 pattern 1, 8 pattern 2, all passing the validator. Patterns 4 and the rest are untouched.
+
+**The answer the validator could not catch.** *"The TV I received has a broken seal. Can I get a refund or do I have to exchange it?"* The model wrote *"You can, however, exchange the TV for a new one. Let me arrange the exchange for you."* The policy says broken-seal electronics are **only exchangeable for defects**, and the customer never said it was faulty. The model dropped the condition - which is the exact stretch behaviour this fine-tune exists to remove - and **every rule passed it**, because no substring rule can see a *missing* qualification. Fixed in the pattern-3 template (carry every condition across; if a condition decides the answer and the customer hasn't said whether they meet it, **ask**, don't assume in their favour). The re-run produced the right answer, asking whether the TV is faulty.
+
+This is the strongest argument yet for the Step 13 judge: `validate.py` catches forbidden strings, never missing qualifications.
+
+**Then the overshoot.** With that instruction in, a "when will my refund arrive?" answer recited the 14-day/unused/original-packaging conditions at someone who only asked about timing. One line added to rein it in. The pattern-1 template needs the same correction - the delivery-date and address-change answers pad with the entire shipping section instead of offering the one nearest alternative.
+
+**The tic, now visible in data.** All 16 pattern 1 and 2 answers open *"Our policies don't cover X"* and close with a near-identical hand-off. The seeds all read that way and each prompt shows the model three of them, so it is learning the sentence rather than the behaviour. **Decision: loosen.** A dataset with one hand-off phrase trains a reflex that fires whenever a question feels unfamiliar, and it makes Step 13's `HANDS_OFF` substring check self-fulfilling - the evaluation would lose the ability to fail.
 
 ### What the trial runs taught
 The first 32-question trial mislabelled pattern 1 completely — all eight were really pattern 3. The one-line briefs described the shape of the *answer* rather than giving a test that could be run on a *question*. The rewritten briefs give each pattern a test, worked examples, and near-misses explicitly marked as not that pattern. On the re-run, pattern 1 came back clean and the model even found a boundary by itself: seed 21 with "already shipped" removed, which correctly flips 4 → 1.
@@ -125,11 +140,18 @@ Second fix: `load_existing()` read only the generated file, so the 25 seed topic
 
 **Pending:** cut the scratched-frying-pan pattern-4 line. "Used once, now looks a bit scratched" is a customer edging toward a defect claim, so it has two defensible answers — which makes it a poor training example.
 
-### Next
-1. **Pass 2 — the answers.** The hard half. `validate.py` has only ever seen hand-written answers; the design question is how generated answers get past those five rules without hand-editing 400 of them.
-2. Merge and dedupe seeds with generated questions.
-3. Scale to 300–500 once pass 2 is trustworthy.
-4. Decide whether the dataset lives on HF Datasets (free) or just in the repo.
+### Next — resume here
+1. **Check whether the `HANDOFF_PHRASES` edit to `validate.py` was saved before the break.** The commit `step11-pass2-answer-generator` definitely contains the three verified rules; the hand-off loosening may or may not have gone in. `git diff` / open the file and look for `HANDOFF_PHRASES`. If it's absent, apply it: rule 5 accepts a closed list of phrasings ("connect you with a human", "put you through to someone", "speak to a colleague"...) via a `hands_off()` helper, instead of one literal string. Then `python data/validate.py` (25 must still pass) and `python data/validate.py data/training_pairs.jsonl` (all 24 must still pass - the list is a superset, so this can only loosen).
+2. **Rewrite roughly half the pattern 1, 2 and 4 seeds** so openers and closers vary. This is what actually breaks the tic: the generator copies the examples it is shown, so the examples have to vary first.
+3. **Two label fixes owed.** `spice jars, one missing` is labelled pattern 1 but this morning's ruling makes a missing piece a "wrong item", so it is **pattern 3** - the current answer declines something the policy covers. `headphones with a slight hiss` is a defect complaint with no clean bucket; **cut it**, like the scratched frying pan.
+4. Fix the pattern-1 template to offer **one** nearest alternative with only the conditions that bear on it.
+5. Delete `training_pairs.jsonl` and re-run all 48 once the seeds vary, then read them.
+6. **Re-run pass 1 at higher `TARGETS`** for 300-500 questions - and re-check the labels, since the pattern-1 mislabelling took a full round trip to find.
+7. **The pattern split is still an open design decision.** Currently 8/16/8/16. A dataset teaching "say it isn't covered" probably wants more pattern 1 than anything else; pattern 3 mainly exists so the model doesn't learn to decline everything. Decide deliberately before generating 400.
+8. Merge and dedupe seeds with generated questions.
+9. Decide whether the dataset lives on HF Datasets (free) or just in the repo.
+
+**Rough remaining effort:** two or three working sessions. Generation is ~45 min of unattended wall-clock for 400; the real cost is reading the output, ~3-4 hours if you read the first hundred closely and spot-read 1 in 4 after that, plus everything parked.
 
 ## Known weaknesses to address later
 - **No auth on the live URL.** Deliberate and documented, but real.
@@ -147,7 +169,7 @@ Second fix: `load_existing()` read only the generated file, so the 25 seed topic
 
 Mid-step, Hugging Face Spaces stopped being free for Docker. Moving the whole deployment to Render cost two lines (dropping the HF-specific `useradd` block, and reading `PORT` from the environment).
 
-**Step 11 is roughly half done.** Baseline measured, target behaviour settled as a four-pattern rubric, 25 seeds hand-written, validator green, question generator working and trusted at 48 questions. What's left is pass 2 — the answers — then scaling to 300–500. Details in the Step 11 section above.
+**Step 11 is roughly half done.** Baseline measured, target behaviour settled as a four-pattern rubric, 25 seeds hand-written, validator green, question generator trusted at 48 questions, and pass 2 working with 24 of those 48 answered. Paused mid-change: the hand-off rule is being loosened so the dataset doesn't teach one sentence. Resume at **Next** in the Step 11 section above — job 1 is a one-line check that survives the break. Everything through `step11-pass2-answer-generator` is pushed; the generated `.jsonl` files stay untracked until they have had a human pass.
 
 ## How to resume
 "You're my mentor on this project. Read MENTOR_CONTEXT.md and GUIDEBOOK.md, then continue from Current position using the same step-by-step teaching style: plain-English design first, one task at a time, wait for my output before moving on."
