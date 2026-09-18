@@ -6,7 +6,7 @@ Learning to build production-grade AI agents. Background: n8n / Zapier / Make au
 ## The project
 E-commerce customer-support agent. Local repo: `C:\projects\ecom-support-agent`. Branch `main`. GitHub: `https://github.com/Dhanushgit17/ecom-support-agent` (public). **Live: `https://ecom-support-agent.onrender.com`**. Free stack only.
 
-**Built so far — Phase 1 and Phase 2 complete (steps 1–10):**
+**Built so far — Phases 1 and 2 complete (steps 1–10); Step 11 in progress:**
 - `tools.py`: 4 tools — `search_products` (returns matches + in-stock alternatives + a note to the model), `get_order_status`, `get_policy` (RAG), `cancel_order`. Plus `TOOL_SCHEMAS`.
 - `agent_raw.py`: hand-written agent loop, no framework. `MAX_STEPS=8`, catches `groq.BadRequestError` for malformed tool calls, prints `[tool]` and `[result]` lines. System prompt requires `get_order_status` before asking to confirm a cancellation.
 - `agent_langgraph.py`: same agent in LangGraph. `SqliteSaver` (`checkpoints.db`), `interrupt_before=["tools"]`, human approval for `cancel_order`. Its `chat()` uses `input()` — terminal only; `api.py` does not import it.
@@ -20,6 +20,7 @@ E-commerce customer-support agent. Local repo: `C:\projects\ecom-support-agent`.
 - `data/`: `products.csv` (8 SKUs), `orders.json` (3 orders), `policies.md` (4 sections incl. "Damaged or wrong items").
 - `evals/cases.jsonl`: 13 cases. `evals/run_evals.py`: runs against `agent_raw.run_agent`, PASS/FAIL/XFAIL/XPASS with reasons, exits 1 on real failures, `normalize()` for typographic characters, snapshots+restores `orders.json` in a `finally`.
 - Current score: **12 passed, 0 failed, 1 expected failure** — green in CI on a clean Linux runner.
+- Step 11 so far: `evals/baseline.py`, `data/seeds.md`, `data/validate.py`, `data/generate_questions.py`. See the Step 11 section below.
 - `docs/GUIDEBOOK.md`: Chapters 1–10.
 - `README.md`: live URL, architecture diagram, deployment section, five "things worth knowing", known limitations, roadmap.
 
@@ -42,12 +43,14 @@ E-commerce customer-support agent. Local repo: `C:\projects\ecom-support-agent`.
 - Eval expected values come from the data files, never from the agent's output.
 - Verify destructive actions against the file on disk (`git status`), never against what the agent says it did.
 - Test that a gate *opens* as well as that it closes.
+- **When a prompt asks the model to classify or generate by category, give it a test it can run, worked examples, and near-misses that are explicitly not that category.** A one-line description of a category produces confident mislabelling.
 - **Ask, don't guess.** `inspect.signature(SomeClass.__init__)` for libraries, `client.models.list()` for Groq, and web-search anything about a third party's pricing or free tier before planning around it.
 - **Check a credential exists before theorising about why it's rejected.** An empty secret fails at the connection layer, not with a clean 401.
 - When several coordinated edits are needed across files, mentor writes out the complete files rather than patch instructions.
 - No local Docker, so every container change costs a 3–5 minute remote build. Read carefully rather than iterating.
 
 ## Known quirks of my setup
+- **A missing package in a project that worked yesterday means the venv isn't active.** Fresh terminal = system Python 3.14 with none of the project's packages. `python -c "import sys; print(sys.executable)"` before theorising; `.\.venv\Scripts\Activate.ps1` to fix. Same family as the white dot: the environment isn't what you think it is.
 - **Save before running.** White dot on the VS Code tab = not on disk. Has cost real time three times.
 - **The editor is not the disk.** `api.py` once looked like 85 lines in VS Code while `type api.py` showed 2.
 - **`type` mangles UTF-8** on Windows (em-dashes show as `â€”`), so it's reliable for checking structure but not content. `Get-Content -Encoding UTF8` reads it properly.
@@ -76,9 +79,57 @@ The XFAIL case: *"I ordered the wrong size. Can I exchange it for a different si
 
 **New finding from the first CI run (Step 10):** the failure mode is **not stable**. Three local runs all stretched the returns policy. The CI run did something different — *"Could you please share your order ID so I can check its status and see if it's eligible for..."* — treating an exchange question as an order question. Still XFAIL (no hand-off phrase), but a different wrong behaviour.
 
-**Consequence for Step 11:** measure the baseline across several runs before writing a single training example, and make sure the dataset covers both failure modes, not just the stretch. A baseline measured once is noise.
+**Consequence for Step 11:** measure the baseline across several runs before writing a single training example, and make sure the dataset covers both failure modes, not just the stretch. A baseline measured once is noise. **Done — see the Step 11 section: 10 runs on the base prompt, 10 more with the rule stated in the prompt.**
 
 Target answer: acknowledge it isn't covered, state what the policy does allow, hand off to a human.
+
+## Step 11 in progress — the fine-tuning dataset
+
+**Commits:** `step11-baseline-measurement`, `step11-prompt-ceiling-experiment`, `step11-first-four-seeds`, `step11-25-seeds`, `step11-seeds-cleanup`, `step11-validator`, `step11-question-generator`, `step11-briefs-with-examples`.
+
+### Baseline — measured, not guessed
+`evals/baseline.py` runs one prompt N times and buckets each answer (stretch / redirect / near_target / target / other / error), writing every answer to `evals/baseline_exchange.jsonl`. `--rules` appends `EXTRA_RULES` to the system prompt and writes to `baseline_exchange_rules.jsonl`.
+
+- Base system prompt, 10 runs: **8 stretch, 1 redirect, 1 target.**
+- Base prompt + the rule stated plainly in English, 10 runs: **7 stretch, 2 target, 1 other.**
+
+That second number is the whole justification for fine-tuning: *telling* the model the rule gets it right 20% of the time. The prompt ceiling is real and now measured.
+
+Two bucketing false negatives, kept as evidence for Step 13's LLM judge — substring matching cannot see either:
+- base run 2 says "we can arrange a size exchange" → bucketed `redirect`, because the phrase list has "arrange an exchange" and not "a size exchange".
+- rules run 6 is a target-quality answer → bucketed `other`, because "doesn't provide a specific exchange-for-a-different-size option" matches no `ACKNOWLEDGES_GAP` phrase.
+
+### The four patterns
+- **1** — not covered, but a nearby section offers a real alternative, and nothing in the customer's message disqualifies them. *This is the actual target behaviour.*
+- **2** — not covered, nothing adjacent worth offering.
+- **3** — covered: the policy answers it, or a tool can act on it. No hand-off.
+- **4** — a section applies, but a condition in the customer's own message rules them out and no other route exists. Human exception only.
+
+### Boundary rulings, settled against `policies.md` — keep these for the Step 13 judge
+- **Broken seal on electronics:** if the customer says the item *works*, they have closed the exchange-for-a-defect route themselves → pattern 4. If they haven't said it works, that route is open and the policy answers it → pattern 3. One volunteered fact moves the same situation between buckets.
+- **A missing piece from a set** → the parcel didn't contain what was ordered, so "Damaged or wrong items" applies → pattern 3.
+- **The damaged section is about what arrived** (broken, missing, not what was ordered). **The seal clause is about the item's condition.** A working item in a tampered box is the seal clause's business, not the damaged section's.
+- **A shipped order the customer wants to cancel** → pattern 3: the policy gives a route (refuse delivery, or return it).
+- **Pattern 4 wording:** the customer tells the story and does *not* know it disqualifies them. They must never quote the policy or concede the rule in advance — otherwise the model learns to spot a confession rather than to apply a condition.
+
+### Files
+- `data/seeds.md` — 25 hand-written examples, **3/7/11/4** across patterns 1/2/3/4. Answer template: name the gap plainly → state what the policy *does* allow → never imply the workaround resolves the request → offer a human.
+- `data/validate.py` — 5 rules, written *before* any generation so no rule could be softened to rescue work already done: every number must come from `policies.md` or the customer's message; no invented storefront UI; replacements only when the customer reports damage or a wrong item; hand-off present for 1/2/4 and absent for 3; pattern 2 capped at two sentences. Self-test = all 25 seeds must pass. Green.
+- `data/generate_questions.py` — pass 1, **questions only**. Questions and answers are generated separately so the model can't pattern-match whole examples. Appends, tops up to `TARGETS`, and shows the model everything already written (seeds included, via `parse_seeds()` imported from `validate.py`).
+- `data/generated_questions.jsonl` — **48 questions, 8/16/8/16. Untracked, deliberately**: generated questions need a human pass before they earn a place in the repo.
+
+### What the trial runs taught
+The first 32-question trial mislabelled pattern 1 completely — all eight were really pattern 3. The one-line briefs described the shape of the *answer* rather than giving a test that could be run on a *question*. The rewritten briefs give each pattern a test, worked examples, and near-misses explicitly marked as not that pattern. On the re-run, pattern 1 came back clean and the model even found a boundary by itself: seed 21 with "already shipped" removed, which correctly flips 4 → 1.
+
+Second fix: `load_existing()` read only the generated file, so the 25 seed topics were invisible and pattern 2 reproduced them almost verbatim (7 of 8). With seeds counted as already-written, 16 pattern-2 topics across two batches came back with zero repeats.
+
+**Pending:** cut the scratched-frying-pan pattern-4 line. "Used once, now looks a bit scratched" is a customer edging toward a defect claim, so it has two defensible answers — which makes it a poor training example.
+
+### Next
+1. **Pass 2 — the answers.** The hard half. `validate.py` has only ever seen hand-written answers; the design question is how generated answers get past those five rules without hand-editing 400 of them.
+2. Merge and dedupe seeds with generated questions.
+3. Scale to 300–500 once pass 2 is trustworthy.
+4. Decide whether the dataset lives on HF Datasets (free) or just in the repo.
 
 ## Known weaknesses to address later
 - **No auth on the live URL.** Deliberate and documented, but real.
@@ -96,11 +147,7 @@ Target answer: acknowledge it isn't covered, state what the policy does allow, h
 
 Mid-step, Hugging Face Spaces stopped being free for Docker. Moving the whole deployment to Render cost two lines (dropping the HF-specific `useradd` block, and reading `PORT` from the environment).
 
-**Next: Step 11 — pick the fine-tuning task and build a 300–500 example dataset.** First jobs:
-1. **Measure the baseline properly.** Run the XFAIL case 5–10 times and record what it actually does. The CI run proved one measurement isn't enough.
-2. **Decide the exact target behaviour** and write it as a rubric, since Step 13's LLM judge will need one anyway.
-3. **Work out where 300–500 examples come from** on a free stack — hand-written seeds, generated variations, or a mix. Needs a design conversation.
-4. Decide whether the dataset lives on HF Datasets (free) or just in the repo.
+**Step 11 is roughly half done.** Baseline measured, target behaviour settled as a four-pattern rubric, 25 seeds hand-written, validator green, question generator working and trusted at 48 questions. What's left is pass 2 — the answers — then scaling to 300–500. Details in the Step 11 section above.
 
 ## How to resume
 "You're my mentor on this project. Read MENTOR_CONTEXT.md and GUIDEBOOK.md, then continue from Current position using the same step-by-step teaching style: plain-English design first, one task at a time, wait for my output before moving on."
